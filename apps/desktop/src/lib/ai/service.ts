@@ -396,6 +396,11 @@ export class AIService {
 		try {
 			return await evaluateAndParse();
 		} catch {
+			prompt.push({
+				role: MessageRole.User,
+				content:
+					"The previous response was not a single parseable JSON object. Return exactly one JSON object only, with no Markdown, code fences, or explanation.",
+			});
 			return await evaluateAndParse();
 		}
 	}

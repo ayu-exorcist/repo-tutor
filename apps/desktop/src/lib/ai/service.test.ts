@@ -185,6 +185,7 @@ const commitAuditMaterial: CommitAuditMaterial = {
 };
 
 const commitAuditEvidence = {
+	kind: "hunk" as const,
 	commitId: "abc123",
 	path: "src/parser.ts",
 	hunk: "abc123:src/parser.ts:0",
@@ -496,25 +497,34 @@ describe("AIService", () => {
 			);
 		});
 
-		test("retries when the first response fails validation and parses the second response", async () => {
+		test("retries a non-JSON response with a JSON-only correction", async () => {
 			const { aiService } = buildDefaultServices();
 			const report = commitAuditReport();
 			const client = new DummyAIClient();
 			const evaluate = vi
 				.spyOn(client, "evaluate")
-				.mockResolvedValueOnce("{}")
+				.mockResolvedValueOnce("this is not JSON")
 				.mockResolvedValueOnce(JSON.stringify(report));
 
 			vi.spyOn(aiService, "buildClient").mockResolvedValue(client);
 
 			expect(await aiService.analyzeCommitAudit({ material: commitAuditMaterial })).toEqual(report);
 			expect(evaluate).toHaveBeenCalledTimes(2);
+			const secondPrompt = evaluate.mock.calls[1]![0];
+			expect(secondPrompt).toEqual([
+				{ role: MessageRole.User, content: expect.stringContaining("审计材料") },
+				{
+					role: MessageRole.User,
+					content: expect.stringContaining("Return exactly one JSON object only"),
+				},
+			]);
+			expect(secondPrompt[1]!.content).not.toContain("this is not JSON");
 		});
 
 		test("throws CommitAuditValidationError after two invalid responses", async () => {
 			const { aiService } = buildDefaultServices();
 			const client = new DummyAIClient();
-			const evaluate = vi.spyOn(client, "evaluate").mockResolvedValue("{}");
+			const evaluate = vi.spyOn(client, "evaluate").mockResolvedValue("this is not JSON");
 
 			vi.spyOn(aiService, "buildClient").mockResolvedValue(client);
 

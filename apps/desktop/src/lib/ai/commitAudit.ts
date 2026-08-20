@@ -42,11 +42,20 @@ export interface CommitAuditMaterial {
 	missingMaterials: string[];
 }
 
-export interface CommitAuditEvidence {
+export interface CommitAuditHunkEvidence {
+	kind: "hunk";
 	commitId: string;
 	path: string;
 	hunk: string;
 }
+
+/** A restricted citation of a supplied commit message, allowed only for related clues. */
+export interface CommitAuditMessageEvidence {
+	kind: "message";
+	commitId: string;
+}
+
+export type CommitAuditEvidence = CommitAuditHunkEvidence | CommitAuditMessageEvidence;
 
 /** A claim established by supplied material and backed by precise evidence. */
 export interface CommitAuditFact {
@@ -144,7 +153,7 @@ export function createCommitAuditContract(material: CommitAuditMaterial): Commit
 
 /**
  * Builds the model-facing contract. The material is JSON so the model can only cite
- * commits, paths, and hunks that are visible in this request.
+ * visible commits, paths and hunks, or a visible commit message for related clues.
  */
 export function renderCommitAuditPrompt(material: CommitAuditMaterial): string {
 	assertMaterial(material);
@@ -155,19 +164,19 @@ export function renderCommitAuditPrompt(material: CommitAuditMaterial): string {
 硬性约束：
 1. 只输出一个可解析的 JSON 对象；禁止 Markdown、代码围栏、解释文字或前后缀。
 2. 顶层必须是 {"commits":[...]}。每个规范化后的输入 commit ID 必须恰好对应一个 report：不得多、漏、重复，也不得使用未知 commitHash。
-3. 每个 commit report 必须完整包含：commitHash、metadata{author,committedAt,message}、changeCategories、objectiveChanges、motivation、tradeoffs、risks、relatedClues、adversarialReview、squashWarning。metadata 的三个值必须逐字复用材料中该 commit 的 author、committedAt、message。
+3. 每个 commit report 必须完整包含：commitHash、changeCategories、objectiveChanges、motivation、tradeoffs、risks、relatedClues、adversarialReview、squashWarning。不要输出 metadata；它由调用方根据审计材料本地补充。
 4. changeCategories 必须是非空数组；每个值只能从以下 9 个中文分类中选择，且不得重复：${COMMIT_AUDIT_CHANGE_CATEGORIES.join("、")}。
 5. objectiveChanges 是非空数组；每项都是 {"text":"...","evidence":[...]}，evidence 不得为空。任何由材料可以验证的事实都使用这个格式。risk items 及其他带 evidence 的事实也必须使用相同格式。
-6. 每条 evidence 的 commitId、path、hunk 必须逐字来自审计材料的同一条 commit/file/hunk；不得引用 missingMaterials 或不存在的材料。
+6. hunk evidence 必须是 {"kind":"hunk","commitId":"...","path":"...","hunk":"..."}，其 commitId、path、hunk 必须逐字来自审计材料的同一条 commit/file/hunk。只有 relatedClues 可以额外使用受限的 commit message evidence：{"kind":"message","commitId":"..."}，commitId 必须来自审计材料；其他字段不得使用 message evidence。不得引用 missingMaterials 或不存在的材料。
 7. 无法由材料建立的判断只能使用 {"isInference":true,"text":"(推测)..."}；text 必须以精确前缀 "(推测)" 开头，且推断对象不得附带 evidence。不要把未验证判断伪装成事实。
 8. motivation 只能是有证据事实、合规推断，或精确 sentinel "${INSUFFICIENT_MOTIVATION}"；tradeoffs 只能是有证据事实、合规推断，或精确 sentinel "${INSUFFICIENT_TRADEOFFS}"。
-9. adversarialReview 必须是只包含 hiddenAssumptions 和 temporarySolution 的对象。hiddenAssumptions 审查隐性前提不成立的后果；temporarySolution 审查是否是临时过渡方案及其后续重构暗示。两项都必须是合规的事实或推断对象。
+9. adversarialReview 必须只使用规范字段 hiddenAssumptions 和 temporarySolution。hiddenAssumptions 审查隐性前提不成立的后果；temporarySolution 审查是否是临时过渡方案及其后续重构暗示。两项都必须是合规的事实或推断对象。
 10. squashWarning 是每个 commit 的硬性必填字段：必须明确审视是否应 squash；只有材料证据支持时才作事实性建议，否则使用合规推断，绝不能省略或编造 squash 历史。
 11. 仅一个不同的 commit ID 时，禁止 evolutionSummary 字段（不是空对象，而是完全省略）。两个或更多不同的 commit ID 时，必须输出 evolutionSummary 对象，并完整包含 businessAndDesignGoals、iterationPath、tradeoffsAndDebt、unexplainedDecisions、temporaryApproaches 五项；每项同样遵循事实证据或推断标记规则。
 12. 清理 text 的首尾空白，保持简短直接；不要输出 Markdown、编号、分类外标签或材料外上下文。missingMaterials 只说明不可用内容，不能充当证据。
 
 输出骨架（仅示意；所有文本和证据必须来自真实材料）：
-{"commits":[{"commitHash":"<材料 commit ID>","metadata":{"author":"<材料 metadata.author>","committedAt":"<材料 metadata.committedAt>","message":"<材料 message>"},"changeCategories":["bug修复"],"objectiveChanges":[{"text":"...","evidence":[{"commitId":"<材料 commit ID>","path":"<材料路径>","hunk":"<材料 hunk id>"}]}],"motivation":"${INSUFFICIENT_MOTIVATION}","tradeoffs":"${INSUFFICIENT_TRADEOFFS}","risks":[],"relatedClues":[],"adversarialReview":{"hiddenAssumptions":{"isInference":true,"text":"(推测)..."},"temporarySolution":{"isInference":true,"text":"(推测)..."}},"squashWarning":{"isInference":true,"text":"(推测)..."}}],"evolutionSummary":{"businessAndDesignGoals":{"isInference":true,"text":"(推测)..."},"iterationPath":{"isInference":true,"text":"(推测)..."},"tradeoffsAndDebt":{"isInference":true,"text":"(推测)..."},"unexplainedDecisions":{"isInference":true,"text":"(推测)..."},"temporaryApproaches":{"isInference":true,"text":"(推测)..."}}}
+{"commits":[{"commitHash":"<材料 commit ID>","changeCategories":["bug修复"],"objectiveChanges":[{"text":"...","evidence":[{"kind":"hunk","commitId":"<材料 commit ID>","path":"<材料路径>","hunk":"<材料 hunk id>"}]}],"motivation":"${INSUFFICIENT_MOTIVATION}","tradeoffs":"${INSUFFICIENT_TRADEOFFS}","risks":[],"relatedClues":[],"adversarialReview":{"hiddenAssumptions":{"isInference":true,"text":"(推测)..."},"temporarySolution":{"isInference":true,"text":"(推测)..."}},"squashWarning":{"isInference":true,"text":"(推测)..."}}],"evolutionSummary":{"businessAndDesignGoals":{"isInference":true,"text":"(推测)..."},"iterationPath":{"isInference":true,"text":"(推测)..."},"tradeoffsAndDebt":{"isInference":true,"text":"(推测)..."},"unexplainedDecisions":{"isInference":true,"text":"(推测)..."},"temporaryApproaches":{"isInference":true,"text":"(推测)..."}}}
 
 规范化后的 commit IDs（仅用于一对一报告与演进规则；evidence 仍须引用原始材料中的 ID）：
 ${JSON.stringify(commitIds)}
@@ -181,14 +190,93 @@ export function parseCommitAuditReport(
 	raw: string,
 	material: CommitAuditMaterial,
 ): CommitAuditReport {
-	let value: unknown;
-	try {
-		value = JSON.parse(raw);
-	} catch {
-		throw new CommitAuditValidationError(["response is not valid JSON"]);
+	return validateCommitAuditReport(extractUniqueJsonObject(raw), material);
+}
+
+/** Extracts exactly one complete JSON object while tolerating surrounding model prose or fences. */
+function extractUniqueJsonObject(raw: string): Record<string, unknown> {
+	const trimmed = raw.trim();
+	const candidates: Record<string, unknown>[] = [];
+	if (!trimmed || trimmed.startsWith("[") || isWholeJsonString(trimmed)) {
+		throwInvalidJsonResponse();
 	}
 
-	return validateCommitAuditReport(value, material);
+	for (let start = 0; start < raw.length; start += 1) {
+		if (raw[start] !== "{") continue;
+
+		const end = findJsonObjectEnd(raw, start);
+		if (end === undefined) throwInvalidJsonResponse();
+
+		let candidate: unknown;
+		try {
+			candidate = JSON.parse(raw.slice(start, end));
+		} catch {
+			throwInvalidJsonResponse();
+		}
+		if (!isRecord(candidate)) throwInvalidJsonResponse();
+
+		candidates.push(candidate);
+		start = end - 1;
+	}
+
+	if (candidates.length !== 1) throwInvalidJsonResponse();
+	return candidates[0]!;
+}
+
+function isWholeJsonString(value: string): boolean {
+	if (value[0] !== '"') return false;
+
+	let isEscaped = false;
+	for (let index = 1; index < value.length; index += 1) {
+		const character = value[index]!;
+		if (isEscaped) {
+			isEscaped = false;
+		} else if (character === "\\") {
+			isEscaped = true;
+		} else if (character === '"') {
+			return index === value.length - 1;
+		}
+	}
+
+	return false;
+}
+
+/** Finds the end of an object while respecting JSON strings, escapes, and nested arrays/objects. */
+function findJsonObjectEnd(raw: string, start: number): number | undefined {
+	const expectedClosers: ("}" | "]")[] = [];
+	let inString = false;
+	let isEscaped = false;
+
+	for (let index = start; index < raw.length; index += 1) {
+		const character = raw[index]!;
+		if (inString) {
+			if (isEscaped) {
+				isEscaped = false;
+			} else if (character === "\\") {
+				isEscaped = true;
+			} else if (character === '"') {
+				inString = false;
+			}
+			continue;
+		}
+
+		if (character === '"') {
+			inString = true;
+		} else if (character === "{") {
+			expectedClosers.push("}");
+		} else if (character === "[") {
+			expectedClosers.push("]");
+		} else if (character === "}" || character === "]") {
+			if (expectedClosers.pop() !== character) return undefined;
+			if (expectedClosers.length === 0) return index + 1;
+		}
+	}
+
+	return undefined;
+}
+
+function throwInvalidJsonResponse(): never {
+	throw new CommitAuditValidationError(["response is not valid JSON"]);
 }
 
 /** Runtime validation boundary for untrusted model output. */
@@ -218,7 +306,7 @@ export function validateCommitAuditReport(
 	}
 
 	if (issues.length > 0) throw new CommitAuditValidationError(issues);
-	return value as unknown as CommitAuditReport;
+	return hydrateCommitAuditMetadata(value, material);
 }
 
 function validateCommitReports(
@@ -263,7 +351,6 @@ function validateCommitReports(
 			return;
 		}
 
-		validateMetadata(report.metadata, materialCommit, `${path}.metadata`, issues);
 		validateChangeCategories(report.changeCategories, `${path}.changeCategories`, issues);
 		validateStatementArray(
 			report.objectiveChanges,
@@ -288,7 +375,15 @@ function validateCommitReports(
 			issues,
 		);
 		validateStatementArray(report.risks, `${path}.risks`, material, issues);
-		validateStatementArray(report.relatedClues, `${path}.relatedClues`, material, issues);
+		validateStatementArray(
+			report.relatedClues,
+			`${path}.relatedClues`,
+			material,
+			issues,
+			false,
+			false,
+			true,
+		);
 		validateAdversarialReview(
 			report.adversarialReview,
 			`${path}.adversarialReview`,
@@ -305,26 +400,26 @@ function validateCommitReports(
 	}
 }
 
-function validateMetadata(
-	value: unknown,
-	materialCommit: CommitAuditCommitMaterial,
-	path: string,
-	issues: string[],
-): void {
-	if (!isRecord(value) || !hasExactKeys(value, ["author", "committedAt", "message"])) {
-		issues.push(`${path} must contain exactly author, committedAt, and message`);
-		return;
-	}
-	if (typeof value.message !== "string" || !value.message.trim()) {
-		issues.push(`${path}.message must be a non-empty string`);
-	}
-	if (
-		!areJsonValuesEqual(value.author, materialCommit.metadata.author) ||
-		!areJsonValuesEqual(value.committedAt, materialCommit.metadata.committedAt) ||
-		value.message !== materialCommit.message
-	) {
-		issues.push(`${path} must exactly match the commit material`);
-	}
+function hydrateCommitAuditMetadata(
+	value: Record<string, unknown>,
+	material: CommitAuditMaterial,
+): CommitAuditReport {
+	return {
+		...value,
+		commits: (value.commits as Record<string, unknown>[]).map((report) => {
+			const materialCommit = material.commits.find((commit) => commit.id === report.commitHash);
+			if (!materialCommit) throw new Error("validated commit report is missing material");
+			const { metadata: _discardedMetadata, ...modelReport } = report;
+			return {
+				...modelReport,
+				metadata: {
+					author: materialCommit.metadata.author,
+					committedAt: materialCommit.metadata.committedAt,
+					message: materialCommit.message,
+				},
+			};
+		}),
+	} as unknown as CommitAuditReport;
 }
 
 function validateChangeCategories(value: unknown, path: string, issues: string[]): void {
@@ -357,11 +452,51 @@ function validateAdversarialReview(
 	issues: string[],
 ): void {
 	const fields = ["hiddenAssumptions", "temporarySolution"] as const;
-	if (!isRecord(value) || !hasExactKeys(value, fields)) {
-		issues.push(`${path} must contain exactly hiddenAssumptions and temporarySolution`);
+	if (!isRecord(value)) {
+		issues.push(`${path} must be an object`);
 		return;
 	}
+
+	const aliases = {
+		hiddenAssumptions: "hiddenAssumptions",
+		hiddenAssumption: "hiddenAssumptions",
+		temporarySolution: "temporarySolution",
+		temporary: "temporarySolution",
+	} as const;
+	const normalized: Partial<Record<(typeof fields)[number], unknown>> = {};
+	for (const [key, statement] of Object.entries(value)) {
+		const field = aliases[key as keyof typeof aliases];
+		if (!field) {
+			issues.push(`${path} contains unknown fields`);
+			continue;
+		}
+		if (Object.prototype.hasOwnProperty.call(normalized, field)) {
+			issues.push(`${path} must not contain duplicate ${field} fields`);
+			continue;
+		}
+		normalized[field] = statement;
+	}
+
+	const hasHiddenAssumptions = normalized.hiddenAssumptions !== undefined;
+	const hasTemporarySolution = normalized.temporarySolution !== undefined;
+	if (!hasHiddenAssumptions && !hasTemporarySolution) {
+		issues.push(`${path} must contain hiddenAssumptions or temporarySolution`);
+		return;
+	}
+	if (!hasHiddenAssumptions)
+		normalized.hiddenAssumptions = insufficientAdversarialReviewStatement();
+	if (!hasTemporarySolution)
+		normalized.temporarySolution = insufficientAdversarialReviewStatement();
+
+	value.hiddenAssumptions = normalized.hiddenAssumptions;
+	value.temporarySolution = normalized.temporarySolution;
+	delete value.hiddenAssumption;
+	delete value.temporary;
 	for (const field of fields) validateStatement(value[field], `${path}.${field}`, material, issues);
+}
+
+function insufficientAdversarialReviewStatement(): CommitAuditInference {
+	return { isInference: true, text: "(推测)【信息不足，无法推断】" };
 }
 
 function validateEvolutionSummary(
@@ -404,13 +539,21 @@ function validateStatementArray(
 	issues: string[],
 	requireEvidence = false,
 	requireNonEmpty = false,
+	allowMessageEvidence = false,
 ): void {
 	if (!Array.isArray(value) || (requireNonEmpty && value.length === 0)) {
 		issues.push(`${path} must be${requireNonEmpty ? " a non-empty" : " an"} array`);
 		return;
 	}
 	value.forEach((item, index) =>
-		validateStatement(item, `${path}[${index}]`, material, issues, requireEvidence),
+		validateStatement(
+			item,
+			`${path}[${index}]`,
+			material,
+			issues,
+			requireEvidence,
+			allowMessageEvidence,
+		),
 	);
 }
 
@@ -420,6 +563,7 @@ function validateStatement(
 	material: CommitAuditMaterial,
 	issues: string[],
 	requireEvidence = false,
+	allowMessageEvidence = false,
 ): void {
 	if (!isRecord(value)) {
 		issues.push(`${path} must be a fact or an inference object`);
@@ -450,7 +594,13 @@ function validateStatement(
 		return;
 	}
 	value.evidence.forEach((evidence, index) =>
-		validateEvidence(evidence, `${path}.evidence[${index}]`, material, issues),
+		validateEvidence(
+			evidence,
+			`${path}.evidence[${index}]`,
+			material,
+			issues,
+			allowMessageEvidence,
+		),
 	);
 }
 
@@ -459,8 +609,30 @@ function validateEvidence(
 	path: string,
 	material: CommitAuditMaterial,
 	issues: string[],
+	allowMessageEvidence: boolean,
 ): void {
-	if (!isRecord(value) || !hasOnlyKeys(value, ["commitId", "path", "hunk"])) {
+	if (!isRecord(value) || typeof value.kind !== "string") {
+		issues.push(`${path} has an invalid shape`);
+		return;
+	}
+	if (value.kind === "message") {
+		if (!hasExactKeys(value, ["kind", "commitId"])) {
+			issues.push(`${path} has an invalid shape`);
+			return;
+		}
+		if (typeof value.commitId !== "string") {
+			issues.push(`${path} must cite strings`);
+			return;
+		}
+		if (!isKnownMessageEvidence(value, material)) {
+			issues.push(`${path} is not in the audit material`);
+		}
+		if (!allowMessageEvidence) {
+			issues.push(`${path} message evidence is only allowed in relatedClues`);
+		}
+		return;
+	}
+	if (value.kind !== "hunk" || !hasExactKeys(value, ["kind", "commitId", "path", "hunk"])) {
 		issues.push(`${path} has an invalid shape`);
 		return;
 	}
@@ -472,10 +644,17 @@ function validateEvidence(
 		issues.push(`${path} must cite strings`);
 		return;
 	}
-	if (!isKnownEvidence(value, material)) issues.push(`${path} is not in the audit material`);
+	if (!isKnownHunkEvidence(value, material)) issues.push(`${path} is not in the audit material`);
 }
 
-function isKnownEvidence(
+function isKnownMessageEvidence(
+	evidence: Record<string, unknown>,
+	material: CommitAuditMaterial,
+): boolean {
+	return material.commits.some((commit) => commit.id === evidence.commitId);
+}
+
+function isKnownHunkEvidence(
 	evidence: Record<string, unknown>,
 	material: CommitAuditMaterial,
 ): boolean {
@@ -532,29 +711,6 @@ function assertMaterial(material: CommitAuditMaterial): void {
 		}
 	}
 	if (issues.length > 0) throw new CommitAuditValidationError(issues);
-}
-
-function areJsonValuesEqual(left: unknown, right: unknown): boolean {
-	if (Object.is(left, right)) return true;
-	if (Array.isArray(left) && Array.isArray(right)) {
-		return (
-			left.length === right.length &&
-			left.every((item, index) => areJsonValuesEqual(item, right[index]))
-		);
-	}
-	if (isRecord(left) && isRecord(right)) {
-		const leftKeys = Object.keys(left);
-		const rightKeys = Object.keys(right);
-		return (
-			leftKeys.length === rightKeys.length &&
-			leftKeys.every(
-				(key) =>
-					Object.prototype.hasOwnProperty.call(right, key) &&
-					areJsonValuesEqual(left[key], right[key]),
-			)
-		);
-	}
-	return false;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
