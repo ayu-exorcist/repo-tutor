@@ -3,7 +3,7 @@
 	import CommitDetails from "$components/commit/CommitDetails.svelte";
 	import CommitMessageEditor from "$components/commit/CommitMessageEditor.svelte";
 	import CommitTitle from "$components/commit/CommitTitle.svelte";
-	import { isLocalAndRemoteCommit } from "$components/lib";
+	import { isLocalAndRemoteCommit, isUpstreamCommit } from "$components/lib";
 	import Drawer from "$components/shared/Drawer.svelte";
 	import { splitMessage } from "$lib/commits/commitMessage";
 	import { rewrapCommitMessage } from "$lib/config/uiFeatureFlags";
@@ -213,7 +213,15 @@
 						setMode("edit");
 					},
 				}
-			: undefined}
+			: isUpstreamCommit(commit)
+				? {
+						stackId,
+						commitId: commit.id,
+						commitMessage: commit.message,
+						commitStatus: "Remote" as const,
+						commitUrl: forgeInfo ? commitUrl(forgeInfo, commit.id) : undefined,
+					}
+				: undefined}
 		{#if data}
 			<CommitContextMenu {projectId} contextData={data} />
 		{/if}

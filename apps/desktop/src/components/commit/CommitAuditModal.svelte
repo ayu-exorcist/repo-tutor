@@ -5,7 +5,10 @@
 		type CommitAuditReport,
 		type CommitAuditStatement,
 	} from "$lib/ai/commitAudit";
-	import { assembleCommitAuditMaterial } from "$lib/ai/commitAuditMaterial";
+	import {
+		assembleCommitAuditMaterial,
+		type CommitAuditCommitSource,
+	} from "$lib/ai/commitAuditMaterial";
 	import { AI_SERVICE } from "$lib/ai/service";
 	import { DIFF_SERVICE } from "$lib/hunks/diffService.svelte";
 	import { STACK_SERVICE } from "$lib/stacks/stackService.svelte";
@@ -13,6 +16,12 @@
 	import { Button, InfoMessage, Modal } from "@gitbutler/ui";
 
 	type AuditState = "idle" | "loading" | "ready" | "error";
+
+	export type CommitAuditScope = {
+		commitIds: readonly string[];
+		stackId?: string;
+		commitSources?: readonly CommitAuditCommitSource[];
+	};
 
 	type Props = {
 		projectId: string;
@@ -25,8 +34,7 @@
 
 	let modal: Modal | undefined = $state();
 	let auditState = $state<AuditState>("idle");
-	let stackId: string | undefined = $state();
-	let commitIds: string[] = $state([]);
+	let scope: CommitAuditScope | undefined = $state();
 	let material: CommitAuditMaterial | undefined = $state();
 	let report: CommitAuditReport | undefined = $state();
 	let errorMessage: string | undefined = $state();
@@ -34,10 +42,12 @@
 
 	const isLoading = $derived(auditState === "loading");
 
-	export function show(nextStackId: string | undefined, nextCommitIds: readonly string[]) {
+	export function show(nextScope: CommitAuditScope) {
 		reset();
-		stackId = nextStackId;
-		commitIds = normalizeCommitIds([...nextCommitIds]);
+		scope = {
+			...nextScope,
+			commitIds: normalizeCommitIds(nextScope.commitIds),
+		};
 		modal?.show();
 		void runAudit();
 	}
@@ -45,8 +55,7 @@
 	function reset() {
 		runId += 1;
 		auditState = "idle";
-		stackId = undefined;
-		commitIds = [];
+		scope = undefined;
 		material = undefined;
 		report = undefined;
 		errorMessage = undefined;
@@ -54,19 +63,26 @@
 
 	async function runAudit() {
 		const currentRunId = ++runId;
-		const selectedStackId = stackId;
-		const selectedCommitIds = [...commitIds];
+		const selectedScope = scope;
 		auditState = "loading";
 		errorMessage = undefined;
 		report = undefined;
 		material = undefined;
 
-		if (!selectedStackId) {
-			setError(currentRunId, "该提交不属于可用的 Stack，无法执行 AI 审计。");
+		if (!selectedScope) {
+			setError(currentRunId, "未选择可审计的提交。");
 			return;
 		}
+		const selectedCommitIds = [...selectedScope.commitIds];
 		if (selectedCommitIds.length === 0) {
 			setError(currentRunId, "未选择可审计的提交。");
+			return;
+		}
+		if (!selectedScope.stackId && !selectedScope.commitSources) {
+			setError(
+				currentRunId,
+				"该提交既不属于可用的 Stack，也没有可用的提交材料，无法执行 AI 审计。",
+			);
 			return;
 		}
 
@@ -77,9 +93,18 @@
 			}
 
 			const nextMaterial = await assembleCommitAuditMaterial(
-				{ projectId, commitIds: selectedCommitIds },
 				{
-					fetchCommitsByIds: (id, ids) => stackService.fetchCommitsByIds(id, selectedStackId, ids),
+					projectId,
+					commitIds: selectedCommitIds,
+					commitSources: selectedScope.commitSources,
+				},
+				{
+					fetchCommitsByIds: (id, ids) => {
+						if (!selectedScope.stackId) {
+							throw new Error("No Stack is available for commit metadata.");
+						}
+						return stackService.fetchCommitsByIds(id, selectedScope.stackId, ids);
+					},
 					fetchCommitChanges: (id, commitId) => stackService.fetchCommitChanges(id, commitId),
 					fetchChanges: (id, changes) => diffService.fetchChanges(id, changes),
 				},

@@ -267,4 +267,56 @@ describe("assembleCommitAuditMaterial", () => {
 			"Commit changes are unavailable for broken: request failed.",
 		]);
 	});
+
+	test("uses direct commit sources in normalized request order without fetching metadata", async () => {
+		const fetchCommitsByIds = vi.fn();
+		const source = adapters({
+			fetchCommitsByIds,
+			fetchCommitChanges: async (_projectId, commitId) => details([change(`${commitId}.ts`)]),
+			fetchChanges: async (_projectId, changes) => [
+				{ path: changes[0]!.path, diff: patch(`@@ -1 +1 @@ ${changes[0]!.path}\n+change`) },
+			],
+		});
+
+		const material = await assembleCommitAuditMaterial(
+			{
+				projectId: "project",
+				commitIds: [" first ", "second", "first"],
+				commitSources: [commit("second"), commit("first")],
+			},
+			source,
+		);
+
+		expect(fetchCommitsByIds).not.toHaveBeenCalled();
+		expect(material.commits.map((item) => item.id)).toEqual(["first", "second"]);
+		expect(material.commits.map((item) => item.files[0]?.path)).toEqual(["first.ts", "second.ts"]);
+	});
+
+	test("reports missing direct sources while retaining direct same-path patches", async () => {
+		const fetchCommitsByIds = vi.fn();
+		const source = adapters({
+			fetchCommitsByIds,
+			fetchCommitChanges: async () => details([change("shared.ts")]),
+			fetchChanges: async () => [{ path: "shared.ts", diff: patch("@@ -1 +1 @@ shared\n+change") }],
+		});
+
+		const material = await assembleCommitAuditMaterial(
+			{
+				projectId: "project",
+				commitIds: ["one", "missing", "two"],
+				commitSources: [commit("two"), commit("one")],
+			},
+			source,
+		);
+
+		expect(fetchCommitsByIds).not.toHaveBeenCalled();
+		expect(material.commits.map((item) => item.id)).toEqual(["one", "two"]);
+		expect(material.commits.map((item) => item.files[0]?.hunks?.[0]?.id)).toEqual([
+			"one:shared.ts:0",
+			"two:shared.ts:0",
+		]);
+		expect(material.missingMaterials).toEqual([
+			"Commit metadata is unavailable for missing: commit was not returned.",
+		]);
+	});
 });

@@ -1,7 +1,9 @@
 <script lang="ts">
 	import BranchCard from "$components/branch/BranchCard.svelte";
-	import BranchesViewCommitContextMenu from "$components/branchesPage/BranchesViewCommitContextMenu.svelte";
 	import CherryApplyModal from "$components/commit/CherryApplyModal.svelte";
+	import CommitContextMenu, {
+		type CommitContextData,
+	} from "$components/commit/CommitContextMenu.svelte";
 	import CommitListItem from "$components/commit/CommitListItem.svelte";
 	import ChangedFilesPanel from "$components/files/ChangedFilesPanel.svelte";
 	import ReduxResult from "$components/shared/ReduxResult.svelte";
@@ -10,7 +12,7 @@
 	import { getColorFromPushStatus, pushStatusToIcon } from "$lib/stacks/stack";
 	import { STACK_SERVICE } from "$lib/stacks/stackService.svelte";
 	import { inject } from "@gitbutler/core/context";
-	import type { BranchDetails, Commit, Segment } from "@gitbutler/but-sdk";
+	import type { BranchDetails, Commit, Segment, UpstreamCommit } from "@gitbutler/but-sdk";
 
 	type Props = {
 		projectId: string;
@@ -22,7 +24,8 @@
 		isTarget?: boolean;
 		inWorkspace?: boolean;
 		selectedCommitId?: string;
-		onCommitClick: (commitId: string) => void;
+		selectedCommitIds?: string[];
+		onCommitClick: (commitId: string, event: MouseEvent, orderedCommitIds: string[]) => void;
 		onFileClick: (index: number) => void;
 		onerror?: (error: unknown) => void;
 	};
@@ -34,9 +37,10 @@
 		segment,
 		remote,
 		isTopBranch = true,
-		inWorkspace,
-		isTarget,
+		inWorkspace: _inWorkspace,
+		isTarget: _isTarget,
 		selectedCommitId,
+		selectedCommitIds = [],
 		onCommitClick,
 		onFileClick,
 		onerror,
@@ -44,6 +48,7 @@
 
 	const stackService = inject(STACK_SERVICE);
 	let cherryApplyModal = $state<CherryApplyModal>();
+	let cherryPickCommitId = $state<string>();
 </script>
 
 {#if segment}
@@ -64,71 +69,140 @@
 	</ReduxResult>
 {/if}
 
-{#snippet commitMenu(rightClickTrigger: HTMLElement)}
-	<BranchesViewCommitContextMenu
-		{rightClickTrigger}
-		onCherryPick={() => {
-			cherryApplyModal?.open();
-		}}
-	/>
+{#snippet renderChangedFiles(commitId: string)}
+	{@const changesQuery = stackService.commitChanges(projectId, commitId)}
+
+	<ReduxResult {projectId} {stackId} result={changesQuery.result}>
+		{#snippet children(changesResult)}
+			<ChangedFilesPanel
+				title="Changed files"
+				{projectId}
+				{stackId}
+				draggableFiles
+				selectionId={createCommitSelection({ commitId, stackId })}
+				changes={changesResult.changes.filter(
+					(change) => !(change.path in (changesResult.conflictEntries?.entries ?? {})),
+				)}
+				stats={changesResult.stats ?? undefined}
+				conflictEntries={changesResult.conflictEntries}
+				autoselect
+				allowUnselect={false}
+				{onFileClick}
+			/>
+		{/snippet}
+	</ReduxResult>
 {/snippet}
 
-{#snippet renderCommitRow(commit: Commit, idx: number, totalLocal: number)}
-	{#snippet menu({ rightClickTrigger }: { rightClickTrigger: HTMLElement })}
-		{@render commitMenu(rightClickTrigger)}
-	{/snippet}
-	{@const commitType: 'LocalOnly' | 'LocalAndRemote' | 'Integrated' = commit.state.type}
+{#snippet renderCommitRow(commit: Commit, idx: number, orderedCommitIds: string[])}
+	{@const commitType: "LocalOnly" | "LocalAndRemote" | "Integrated" = commit.state.type}
 	{@const isDiverged = commit.state.type === "LocalAndRemote" && commit.id !== commit.state.subject}
-	{@const shouldShowMenu = !(inWorkspace || isTarget)}
-	{@const isLastCommit = idx === totalLocal - 1}
+	{@const isSelected = selectedCommitIds.includes(commit.id)}
+	{@const isMultiSelected = isSelected && selectedCommitIds.length > 1}
+	{@const contextData = (
+		commit.state.type === "Integrated"
+			? {
+					stackId,
+					commitId: commit.id,
+					commitMessage: commit.message,
+					commitStatus: "Integrated" as const,
+					multiSelect: isMultiSelected ? { commitIds: selectedCommitIds } : undefined,
+				}
+			: {
+					stackId,
+					commitId: commit.id,
+					commitMessage: commit.message,
+					commitStatus: commit.state.type,
+					hasConflicts: commit.hasConflicts,
+					readOnly: true,
+					onUncommitClick: () => {},
+					onEditMessageClick: () => {},
+					multiSelect: isMultiSelected
+						? {
+								commitIds: selectedCommitIds,
+								onSquashSelected: () => {},
+								onUncommitSelected: () => {},
+							}
+						: undefined,
+				}
+	) satisfies CommitContextData}
+	{#snippet menu({ rightClickTrigger }: { rightClickTrigger: HTMLElement })}
+		<CommitContextMenu
+			showOnHover
+			{projectId}
+			{rightClickTrigger}
+			{contextData}
+			onCherryPick={commit.state.type === "Integrated"
+				? undefined
+				: () => {
+						cherryPickCommitId = commit.id;
+						cherryApplyModal?.open();
+					}}
+		/>
+	{/snippet}
 	<CommitListItem
 		disableCommitActions={false}
 		{stackId}
 		type={commitType}
 		diverged={isDiverged}
 		commitMessage={commit.message}
-		gerritReviewUrl={commit?.gerritReviewUrl ?? undefined}
+		gerritReviewUrl={commit.gerritReviewUrl ?? undefined}
 		committedAt={commitCommittedAt(commit)}
 		commitId={commit.id}
 		{branchName}
-		selected={commit.id === selectedCommitId}
+		selected={isSelected}
 		active={commit.id === selectedCommitId}
-		lastCommit={isLastCommit}
-		onclick={() => {
-			onCommitClick(commit.id);
-		}}
-		{...shouldShowMenu && { menu }}
+		expandChangedFiles={isSelected && selectedCommitIds.length <= 1}
+		lastCommit={idx === orderedCommitIds.length - 1}
+		onclick={(event) => onCommitClick(commit.id, event, orderedCommitIds)}
+		{menu}
 	>
 		{#snippet changedFiles()}
-			{@const changesQuery = stackService.commitChanges(projectId, commit.id)}
+			{@render renderChangedFiles(commit.id)}
+		{/snippet}
+	</CommitListItem>
+{/snippet}
 
-			<ReduxResult {projectId} {stackId} result={changesQuery.result}>
-				{#snippet children(changesResult)}
-					<ChangedFilesPanel
-						title="Changed files"
-						{projectId}
-						{stackId}
-						draggableFiles
-						selectionId={createCommitSelection({ commitId: commit.id, stackId })}
-						changes={changesResult.changes.filter(
-							(change) => !(change.path in (changesResult.conflictEntries?.entries ?? {})),
-						)}
-						stats={changesResult.stats ?? undefined}
-						conflictEntries={changesResult.conflictEntries}
-						autoselect
-						allowUnselect={false}
-						{onFileClick}
-					/>
-				{/snippet}
-			</ReduxResult>
+{#snippet renderUpstreamCommitRow(commit: UpstreamCommit, idx: number, orderedCommitIds: string[])}
+	{@const isSelected = selectedCommitIds.includes(commit.id)}
+	{@const isMultiSelected = isSelected && selectedCommitIds.length > 1}
+	{@const contextData = {
+		stackId,
+		commitId: commit.id,
+		commitMessage: commit.message,
+		commitStatus: "Remote" as const,
+		multiSelect: isMultiSelected ? { commitIds: selectedCommitIds } : undefined,
+	} satisfies CommitContextData}
+	{#snippet menu({ rightClickTrigger }: { rightClickTrigger: HTMLElement })}
+		<CommitContextMenu showOnHover {projectId} {rightClickTrigger} {contextData} />
+	{/snippet}
+	<CommitListItem
+		disableCommitActions={false}
+		{stackId}
+		type="Remote"
+		commitMessage={commit.message}
+		committedAt={commitCommittedAt(commit)}
+		commitId={commit.id}
+		{branchName}
+		selected={isSelected}
+		active={commit.id === selectedCommitId}
+		expandChangedFiles={isSelected && selectedCommitIds.length <= 1}
+		lastCommit={idx === orderedCommitIds.length - 1}
+		onclick={(event) => onCommitClick(commit.id, event, orderedCommitIds)}
+		{menu}
+	>
+		{#snippet changedFiles()}
+			{@render renderChangedFiles(commit.id)}
 		{/snippet}
 	</CommitListItem>
 {/snippet}
 
 {#snippet branchCard(branch: BranchDetails | Segment, env: { projectId: string; stackId?: string })}
 	{@const commitColor = getColorFromPushStatus(branch.pushStatus)}
-	{@const localCount = branch.commits?.length ?? 0}
-	{@const hasCommits = localCount > 0}
+	{@const localCommits = branch.commits ?? []}
+	{@const upstreamCommits =
+		"commitsOnRemote" in branch ? branch.commitsOnRemote : (branch.upstreamCommits ?? [])}
+	{@const orderedCommitIds = [...upstreamCommits, ...localCommits].map((commit) => commit.id)}
+	{@const hasCommits = orderedCommitIds.length > 0}
 	{@const trackingBranch =
 		"refName" in branch
 			? branch.remoteTrackingRefName
@@ -145,7 +219,7 @@
 		projectId={env.projectId}
 		branchName={displayBranchName ?? "Unnamed segment"}
 		{isTopBranch}
-		isNewBranch={localCount === 0}
+		isNewBranch={!hasCommits}
 		iconName={pushStatusToIcon(branch.pushStatus)}
 		{trackingBranch}
 		readonly
@@ -156,8 +230,11 @@
 		{#snippet branchContent()}
 			{#if hasCommits}
 				<div class="branch-commits">
-					{#each branch.commits ?? [] as commit, idx}
-						{@render renderCommitRow(commit, idx, localCount)}
+					{#each upstreamCommits as commit, idx}
+						{@render renderUpstreamCommitRow(commit, idx, orderedCommitIds)}
+					{/each}
+					{#each localCommits as commit, idx}
+						{@render renderCommitRow(commit, upstreamCommits.length + idx, orderedCommitIds)}
 					{/each}
 				</div>
 			{/if}
@@ -165,7 +242,7 @@
 	</BranchCard>
 {/snippet}
 
-<CherryApplyModal bind:this={cherryApplyModal} {projectId} subject={selectedCommitId} />
+<CherryApplyModal bind:this={cherryApplyModal} {projectId} subject={cherryPickCommitId} />
 
 <style lang="postcss">
 	.branch-commits {

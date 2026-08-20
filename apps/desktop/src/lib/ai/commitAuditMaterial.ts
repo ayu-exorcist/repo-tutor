@@ -38,6 +38,11 @@ export interface CommitAuditMaterialAdapters {
 export interface CommitAuditMaterialRequest {
 	projectId: string;
 	commitIds: readonly string[];
+	/**
+	 * Commit metadata already loaded by the caller. When present, this avoids a
+	 * stack-scoped metadata request while commit changes and patches are still fetched.
+	 */
+	commitSources?: readonly CommitAuditCommitSource[];
 }
 
 /**
@@ -53,16 +58,24 @@ export async function assembleCommitAuditMaterial(
 	const missingMaterials: string[] = [];
 
 	let sources: readonly CommitAuditCommitSource[];
-	try {
-		sources = await adapters.fetchCommitsByIds(request.projectId, commitIds);
-	} catch {
-		for (const commitId of commitIds) {
-			missingMaterials.push(`Commit metadata is unavailable for ${commitId}: request failed.`);
+	if (request.commitSources) {
+		sources = request.commitSources;
+	} else {
+		try {
+			sources = await adapters.fetchCommitsByIds(request.projectId, commitIds);
+		} catch {
+			for (const commitId of commitIds) {
+				missingMaterials.push(`Commit metadata is unavailable for ${commitId}: request failed.`);
+			}
+			return { commits: [], missingMaterials };
 		}
-		return { commits: [], missingMaterials };
 	}
 
-	const sourcesById = new Map(sources.map((source) => [source.id, source]));
+	const sourcesById = new Map<string, CommitAuditCommitSource>();
+	for (const source of sources) {
+		const sourceId = normalizeCommitIds([source.id])[0];
+		if (sourceId) sourcesById.set(sourceId, { ...source, id: sourceId });
+	}
 	const orderedSources: CommitAuditCommitSource[] = [];
 	for (const commitId of commitIds) {
 		const source = sourcesById.get(commitId);

@@ -1,5 +1,8 @@
 <script lang="ts">
 	import BranchCard from "$components/branch/BranchCard.svelte";
+	import CommitContextMenu, {
+		type CommitContextData,
+	} from "$components/commit/CommitContextMenu.svelte";
 	import CommitListItem from "$components/commit/CommitListItem.svelte";
 	import ChangedFilesPanel from "$components/files/ChangedFilesPanel.svelte";
 	import ReduxResult from "$components/shared/ReduxResult.svelte";
@@ -17,11 +20,19 @@
 
 	type Props = {
 		projectId: string;
-		onclick: (commitId: string) => void;
+		selectedCommitId?: string;
+		selectedCommitIds?: string[];
+		onCommitClick: (commitId: string, event: MouseEvent, orderedCommitIds: string[]) => void;
 		onFileClick: (index: number) => void;
 	};
 
-	const { projectId, onclick, onFileClick }: Props = $props();
+	const {
+		projectId,
+		selectedCommitId,
+		selectedCommitIds = [],
+		onCommitClick,
+		onFileClick,
+	}: Props = $props();
 
 	const baseBranchService = inject(BASE_BRANCH_SERVICE);
 	const stackService = inject(STACK_SERVICE);
@@ -30,11 +41,14 @@
 	const baseBranchQuery = $derived(baseBranchService.baseBranch(projectId));
 	const baseSha = $derived(baseBranchQuery.response?.baseSha);
 
-	let selectedCommitId = $state<string | undefined>();
 	let loadedIds = $state<string[]>([]);
 	let commits = $state<Commit[]>([]);
 	let loading = $state(false);
 	let throttled = $state(false);
+
+	const auditCommitSources = $derived(
+		commits.filter((commit) => selectedCommitIds.includes(commit.id)),
+	);
 
 	async function loadMore() {
 		if (loading) {
@@ -100,8 +114,35 @@
 						getId={(commit) => commit.id}
 					>
 						{#snippet template(commit, index)}
+							{@const isSelected = selectedCommitIds.includes(commit.id)}
+							{@const isMultiSelected = isSelected && selectedCommitIds.length > 1}
+							{@const contextData = {
+								commitId: commit.id,
+								commitMessage: commit.message,
+								commitStatus: "LocalAndRemote" as const,
+								hasConflicts: commit.hasConflicts,
+								readOnly: true,
+								onUncommitClick: () => {},
+								onEditMessageClick: () => {},
+								multiSelect: isMultiSelected
+									? {
+											commitIds: selectedCommitIds,
+											onSquashSelected: () => {},
+											onUncommitSelected: () => {},
+										}
+									: undefined,
+							} satisfies CommitContextData}
+							{#snippet menu({ rightClickTrigger }: { rightClickTrigger: HTMLElement })}
+								<CommitContextMenu
+									showOnHover
+									{projectId}
+									{rightClickTrigger}
+									{contextData}
+									{auditCommitSources}
+								/>
+							{/snippet}
 							<CommitListItem
-								disableCommitActions
+								disableCommitActions={false}
 								type="LocalAndRemote"
 								diverged={commit.state.type === "LocalAndRemote" &&
 									commit.id !== commit.state.subject}
@@ -111,12 +152,17 @@
 								gerritReviewUrl={commit.gerritReviewUrl ?? undefined}
 								committedAt={commitCommittedAt(commit)}
 								author={commit.author}
-								selected={commit.id === selectedCommitId}
+								selected={isSelected}
+								active={commit.id === selectedCommitId}
+								expandChangedFiles={isSelected && selectedCommitIds.length <= 1}
 								lastCommit={index === commits.length - 1}
-								onclick={() => {
-									selectedCommitId = commit.id;
-									onclick(commit.id);
-								}}
+								onclick={(event) =>
+									onCommitClick(
+										commit.id,
+										event,
+										commits.map((item) => item.id),
+									)}
+								{menu}
 							>
 								{#snippet changedFiles()}
 									{@const changesQuery = stackService.commitChanges(projectId, commit.id)}

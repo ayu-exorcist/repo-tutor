@@ -12,7 +12,8 @@
 		inWorkspace: boolean;
 		isTarget?: boolean;
 		selectedCommitId?: string;
-		onCommitClick: (commitId: string) => void;
+		selectedCommitIds?: string[];
+		onCommitClick: (commitId: string, event: MouseEvent, orderedCommitIds: string[]) => void;
 		onFileClick: (index: number) => void;
 		onerror: (err: unknown) => void;
 	};
@@ -23,6 +24,7 @@
 		inWorkspace,
 		isTarget,
 		selectedCommitId,
+		selectedCommitIds,
 		onCommitClick,
 		onFileClick,
 		onerror,
@@ -55,6 +57,7 @@
 					{inWorkspace}
 					{isTarget}
 					{selectedCommitId}
+					{selectedCommitIds}
 					{onCommitClick}
 					{onFileClick}
 					{onerror}

@@ -1,5 +1,9 @@
 <script lang="ts" module>
 	import type { CommitStatusType } from "$lib/commits/commit";
+	interface MultiSelectCommitData {
+		commitIds: string[];
+	}
+
 	interface BaseContextData {
 		commitStatus: CommitStatusType;
 		commitId: string;
@@ -11,11 +15,12 @@
 		commitStatus: "LocalOnly" | "LocalAndRemote";
 		stackId?: string;
 		hasConflicts?: boolean;
+		/** Hide branch-mutating actions while retaining read-only actions and AI audit. */
+		readOnly?: boolean;
 		onUncommitClick: (event: MouseEvent) => void;
 		onEditMessageClick: (event: MouseEvent) => void;
 		/** When set, indicates multiple commits are selected. */
-		multiSelect?: {
-			commitIds: string[];
+		multiSelect?: MultiSelectCommitData & {
 			onSquashSelected: () => void;
 			onUncommitSelected: () => void;
 		};
@@ -24,11 +29,13 @@
 	interface RemoteCommitContextData extends BaseContextData {
 		commitStatus: "Remote";
 		stackId?: string;
+		multiSelect?: MultiSelectCommitData;
 	}
 
 	interface IntegratedCommitContextData extends BaseContextData {
 		commitStatus: "Integrated";
 		stackId?: string;
+		multiSelect?: MultiSelectCommitData;
 	}
 
 	interface BaseCommitContextData extends BaseContextData {
@@ -54,6 +61,7 @@
 
 <script lang="ts">
 	import CommitAuditModal from "$components/commit/CommitAuditModal.svelte";
+	import type { CommitAuditCommitSource } from "$lib/ai/commitAuditMaterial";
 	import { AI_SERVICE } from "$lib/ai/service";
 	import { CLIPBOARD_SERVICE } from "$lib/backend/clipboard";
 	import { URL_SERVICE } from "$lib/backend/url";
@@ -78,6 +86,8 @@
 		openId?: string;
 		rightClickTrigger?: HTMLElement;
 		contextData: CommitContextData | undefined;
+		auditCommitSources?: readonly CommitAuditCommitSource[];
+		onCherryPick?: () => void;
 	};
 
 	let {
@@ -86,6 +96,8 @@
 		openId = $bindable(),
 		rightClickTrigger,
 		contextData,
+		auditCommitSources,
+		onCherryPick,
 	}: Props = $props();
 
 	const urlService = inject(URL_SERVICE);
@@ -98,21 +110,27 @@
 	const [resolveConflictsAi, aiResolution] = stackService.resolveCommitConflictsAi;
 
 	const aiGenEnabled = $derived(projectAiGenEnabled(projectId));
-	const commitHasConflicts = $derived(
-		contextData !== undefined && "hasConflicts" in contextData && !!contextData.hasConflicts,
+	const auditStackId = $derived(
+		contextData?.commitStatus === "Base" ? undefined : contextData?.stackId,
 	);
-	const localStackId = $derived(
-		contextData?.commitStatus === "LocalAndRemote" || contextData?.commitStatus === "LocalOnly"
-			? contextData.stackId
-			: undefined,
-	);
+	const auditCommitIds = $derived.by(() => {
+		if (!contextData || contextData.commitStatus === "Base") return [];
+		return contextData.multiSelect?.commitIds ?? [contextData.commitId];
+	});
+	const auditSourcesForScope = $derived.by(() => {
+		if (auditCommitIds.length === 0 || !auditCommitSources) return undefined;
+		const sourcesById = new Map(auditCommitSources.map((source) => [source.id, source]));
+		if (!auditCommitIds.every((commitId) => sourcesById.has(commitId))) return undefined;
+		return auditCommitIds.map((commitId) => sourcesById.get(commitId)!);
+	});
+	const hasAuditScope = $derived(!!auditStackId || !!auditSourcesForScope);
 	let aiConfigurationValid = $state(false);
 	let commitAuditModal = $state<CommitAuditModal>();
 
 	// Validating the AI configuration costs several backend calls, so only do
-	// it for local commits that can actually offer an AI action.
+	// it for commits that can actually offer an AI action.
 	$effect(() => {
-		if (!$aiGenEnabled || (!commitHasConflicts && !localStackId)) {
+		if (!$aiGenEnabled || !hasAuditScope) {
 			aiConfigurationValid = false;
 			return;
 		}
@@ -130,14 +148,14 @@
 		};
 	});
 
-	// Component is read-only when stackId is undefined
+	// Component is read-only when its local context is explicitly read-only or has no stack.
 	const isReadOnly = $derived(
 		contextData?.commitStatus === "LocalAndRemote" || contextData?.commitStatus === "LocalOnly"
-			? !contextData.stackId
+			? contextData.readOnly || !contextData.stackId
 			: false,
 	);
 	const commitAuditUnavailableReason = $derived.by(() => {
-		if (!localStackId) return "提交不在本地 Stack 中，无法审计";
+		if (!hasAuditScope) return "提交不在 Stack 中，且提交材料不可用，无法审计";
 		if (!$aiGenEnabled) return "请先在项目设置中启用 AI";
 		if (!aiConfigurationValid) return "请先完成 AI 配置";
 		return undefined;
@@ -178,8 +196,12 @@
 	}
 
 	function openCommitAudit(commitIds: readonly string[]) {
-		if (!localStackId || commitAuditUnavailableReason) return;
-		commitAuditModal?.show(localStackId, [...commitIds]);
+		if (commitAuditUnavailableReason) return;
+		commitAuditModal?.show({
+			commitIds,
+			stackId: auditStackId,
+			commitSources: auditSourcesForScope,
+		});
 	}
 
 	async function handleResolveConflictsAi(commitId: string, stackId: string) {
@@ -230,8 +252,11 @@
 				contextData.commitStatus === "LocalAndRemote" || contextData.commitStatus === "LocalOnly"}
 			{@const multiSelect = isLocal ? contextData.multiSelect : undefined}
 			{@const isMultiSelect = multiSelect && multiSelect.commitIds.length > 1}
+			{@const auditMultiSelect =
+				contextData.commitStatus === "Base" ? undefined : contextData.multiSelect}
+			{@const auditCommitIds = auditMultiSelect?.commitIds ?? [commitId]}
 
-			{#if isLocal}
+			{#if isLocal && !isReadOnly}
 				{#if isMultiSelect}
 					<!-- Multi-select actions -->
 					<ContextMenuSection>
@@ -257,16 +282,6 @@
 									multiSelect.onUncommitSelected();
 									close();
 								}
-							}}
-						/>
-						<ContextMenuItem
-							label="Analyze {multiSelect.commitIds.length} commits with AI"
-							icon="ai"
-							disabled={!!commitAuditUnavailableReason}
-							caption={commitAuditUnavailableReason}
-							onclick={() => {
-								openCommitAudit(multiSelect.commitIds);
-								close();
 							}}
 						/>
 					</ContextMenuSection>
@@ -310,16 +325,7 @@
 								}
 							}}
 						/>
-						<ContextMenuItem
-							label="Analyze commit with AI"
-							icon="ai"
-							disabled={!!commitAuditUnavailableReason}
-							caption={commitAuditUnavailableReason}
-							onclick={() => {
-								openCommitAudit([commitId]);
-								close();
-							}}
-						/>
+
 						{#if contextData.hasConflicts && $aiGenEnabled && aiConfigurationValid}
 							<ContextMenuItem
 								label="Resolve conflicts with AI"
@@ -336,6 +342,36 @@
 						{/if}
 					</ContextMenuSection>
 				{/if}
+			{/if}
+
+			{#if onCherryPick && !isMultiSelect}
+				<ContextMenuSection>
+					<ContextMenuItem
+						label="Cherry-pick commit"
+						icon="cherry-pick"
+						onclick={() => {
+							onCherryPick();
+							close();
+						}}
+					/>
+				</ContextMenuSection>
+			{/if}
+
+			{#if contextData.commitStatus !== "Base"}
+				<ContextMenuSection>
+					<ContextMenuItem
+						label={auditCommitIds.length > 1
+							? `Analyze ${auditCommitIds.length} commits with AI`
+							: "Analyze commit with AI"}
+						icon="ai"
+						disabled={!!commitAuditUnavailableReason}
+						caption={commitAuditUnavailableReason}
+						onclick={() => {
+							openCommitAudit(auditCommitIds);
+							close();
+						}}
+					/>
+				</ContextMenuSection>
 			{/if}
 
 			{#if !isMultiSelect}
@@ -382,7 +418,7 @@
 							</ContextMenuSection>
 						{/snippet}
 					</ContextMenuItemSubmenu>
-					{#if isLocal}
+					{#if isLocal && !isReadOnly}
 						<ContextMenuItemSubmenu label="Add empty commit" icon="commit-plus">
 							{#snippet submenu({ close: closeSubmenu })}
 								<ContextMenuSection>

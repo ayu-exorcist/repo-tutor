@@ -15,6 +15,7 @@
 	import Resizer from "$components/shared/Resizer.svelte";
 	import SashLayer from "$components/shared/SashLayer.svelte";
 	import BranchesViewBranch from "$components/views/BranchesViewBranch.svelte";
+	import { selectCommit } from "$components/views/commitSelection";
 	import TargetCommitList from "$components/views/TargetCommitList.svelte";
 	import { BASE_BRANCH_SERVICE } from "$lib/baseBranch/baseBranchService.svelte";
 	import { BRANCH_SERVICE } from "$lib/branches/branchService.svelte";
@@ -48,9 +49,10 @@
 				remote?: string;
 				stackId?: string;
 				commitId?: string;
+				commitIds?: string[];
 		  }
 		| { type: "pr"; prNumber: number }
-		| { type: "target"; commitId?: string };
+		| { type: "target"; commitId?: string; commitIds?: string[] };
 
 	const stackService = inject(STACK_SERVICE);
 	const baseBranchService = inject(BASE_BRANCH_SERVICE);
@@ -86,6 +88,16 @@
 	);
 
 	let selection = $state<BranchesSelection>({ type: "target" });
+
+	function selectBranchCommit(commitId: string, event: MouseEvent, orderedCommitIds: string[]) {
+		if (selection.type !== "branch") return;
+		selection = { ...selection, ...selectCommit(selection, commitId, event, orderedCommitIds) };
+	}
+
+	function selectTargetCommit(commitId: string, event: MouseEvent, orderedCommitIds: string[]) {
+		if (selection.type !== "target") return;
+		selection = { ...selection, ...selectCommit(selection, commitId, event, orderedCommitIds) };
+	}
 
 	let branchColumn = $state<HTMLDivElement>();
 	let branchViewLeftEl = $state<HTMLDivElement>();
@@ -323,7 +335,9 @@
 					<div class="branch-column" bind:this={branchColumn} use:focusable={{ vertical: true }}>
 						<TargetCommitList
 							{projectId}
-							onclick={(commitId) => (selection = { type: "target", commitId })}
+							selectedCommitId={selection.commitId}
+							selectedCommitIds={selection.commitIds ?? []}
+							onCommitClick={selectTargetCommit}
 							onFileClick={(index) => {
 								multiDiffView?.jumpToIndex(index);
 							}}
@@ -372,15 +386,10 @@
 															selectedCommitId={selection.type === "branch"
 																? selection.commitId
 																: undefined}
-															onCommitClick={(commitId) => {
-																selection = {
-																	type: "branch",
-																	branchName,
-																	remote,
-																	stackId,
-																	commitId,
-																};
-															}}
+															selectedCommitIds={selection.type === "branch"
+																? (selection.commitIds ?? [])
+																: []}
+															onCommitClick={selectBranchCommit}
 															onFileClick={(index) => {
 																multiDiffView?.jumpToIndex(index);
 															}}
@@ -395,15 +404,10 @@
 															selectedCommitId={selection.type === "branch"
 																? selection.commitId
 																: undefined}
-															onCommitClick={(commitId) => {
-																selection = {
-																	type: "branch",
-																	branchName,
-																	remote,
-																	stackId,
-																	commitId,
-																};
-															}}
+															selectedCommitIds={selection.type === "branch"
+																? (selection.commitIds ?? [])
+																: []}
+															onCommitClick={selectBranchCommit}
 															onFileClick={(index) => {
 																multiDiffView?.jumpToIndex(index);
 															}}
@@ -424,9 +428,10 @@
 												selectedCommitId={selection.type === "branch"
 													? selection.commitId
 													: undefined}
-												onCommitClick={(commitId) => {
-													selection = { type: "branch", branchName, remote, stackId, commitId };
-												}}
+												selectedCommitIds={selection.type === "branch"
+													? (selection.commitIds ?? [])
+													: []}
+												onCommitClick={selectBranchCommit}
 												onFileClick={(index) => {
 													multiDiffView?.jumpToIndex(index);
 												}}
