@@ -206,6 +206,20 @@ async function tauriGetAppInfo(): Promise<AppInfo> {
 	return { name: appName, version: appVersion };
 }
 
+function safeIpcParams(command: string, params: Record<string, unknown>): Record<string, unknown> {
+	if (command !== "update_ai_configuration") return params;
+	const update = params.update;
+	if (!update || typeof update !== "object") return params;
+	return {
+		...params,
+		update: {
+			...(update as Record<string, unknown>),
+			openaiApiKey: "<redacted>",
+			anthropicApiKey: "<redacted>",
+		},
+	};
+}
+
 async function tauriInvoke<T>(command: string, params: Record<string, unknown> = {}): Promise<T> {
 	// This commented out code can be used to delay/reject an api call
 	// return new Promise<T>((resolve, reject) => {
@@ -226,7 +240,7 @@ async function tauriInvoke<T>(command: string, params: Record<string, unknown> =
 		return await invokeTauri<T>(command, params);
 	} catch (error: unknown) {
 		if (isNormalizedError(error)) {
-			console.error(`ipc->${command}: ${JSON.stringify(params)}`, error);
+			console.error(`ipc->${command}: ${JSON.stringify(safeIpcParams(command, params))}`, error);
 			// Re-throw as a proper Error subclass so the stack points at the
 			// caller and Sentry can fingerprint by name + message instead of
 			// bucketing every raw `{name, message, code}` rejection together.

@@ -149,7 +149,7 @@
 				throw new Error("Received empty response from AI service");
 			}
 		} catch (e) {
-			console.error("AI credential check error:", e);
+			// Provider errors can include credentials, request bodies, or headers; never log them.
 
 			// Don't show abort errors as they're expected when we cancel the request
 			if (e instanceof Error && e.name === "AbortError") {
@@ -210,7 +210,7 @@
 							{#if (modelKind === ModelKind.OpenAI || modelKind === ModelKind.Anthropic) && isUsingButlerAPI && !userService.user}
 								<span> Please sign in to use GitButler's AI API. </span>
 							{:else if modelKind === ModelKind.OpenAI || modelKind === ModelKind.Anthropic}
-								<span> Please check your API key or try GitButler's API. </span>
+								<span>{error}</span>
 							{:else if modelKind === ModelKind.Ollama}
 								<span>
 									Please check your Ollama endpoint and model configuration.

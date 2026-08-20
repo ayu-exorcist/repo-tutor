@@ -22,6 +22,7 @@ pub mod menu;
 pub mod window;
 pub use window::state::{WindowState, event::ChangeForFrontend};
 
+pub mod ai;
 pub mod askpass;
 pub mod debug;
 pub mod projects;

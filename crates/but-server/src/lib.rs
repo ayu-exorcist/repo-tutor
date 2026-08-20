@@ -17,6 +17,7 @@ use axum::{
 use but_api::{commit, diff, github, gitlab, json, legacy, open, platform, workspace};
 use but_ctx::ProjectHandleOrLegacyProjectId;
 
+mod ai;
 mod broadcaster;
 use broadcaster::Broadcaster;
 use but_settings::AppSettingsWithDiskSync;
@@ -109,6 +110,15 @@ async fn pick_directory(_params: serde_json::Value) -> anyhow::Result<serde_json
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_POWERSHELL_COMMAND_CANDIDATES: [&str; 4] =
+    ["powershell", "powershell.exe", "pwsh", "pwsh.exe"];
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_powershell_command_candidates() -> &'static [&'static str] {
+    &WINDOWS_POWERSHELL_COMMAND_CANDIDATES
+}
+
 /// Shell out to a platform-native directory picker.
 fn native_pick_directory() -> anyhow::Result<Option<String>> {
     #[cfg(target_os = "macos")]
@@ -193,18 +203,35 @@ return POSIX path of theFolder"#,
         // any Windows Forms/COM dialog). FolderBrowserDialog is directory-only.
         // The script outputs the selected path on OK, or empty string on cancel.
         // A non-zero exit means PowerShell itself failed (e.g. Add-Type error).
-        let output = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-STA",
-                "-Command",
-                r#"Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = 'Select a Git repository'; $f.UseDescriptionForTitle = $true; if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath } else { '' }"#,
-            ])
-            .output()?;
+        let args = [
+            "-NoProfile",
+            "-STA",
+            "-Command",
+            r#"Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = 'Select a Git repository'; $f.UseDescriptionForTitle = $true; if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath } else { '' }"#,
+        ];
+        let (command, output) = windows_powershell_command_candidates()
+            .iter()
+            .copied()
+            .find_map(
+                |command| match std::process::Command::new(command).args(args).output() {
+                    Ok(output) => Some(Ok((command, output))),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => Some(Err(anyhow::anyhow!(
+                        "failed to launch Windows directory picker with `{command}`: {error}"
+                    ))),
+                },
+            )
+            .transpose()?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "failed to launch Windows directory picker: none of `{}` was found",
+                    windows_powershell_command_candidates().join("`, `")
+                )
+            })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             anyhow::bail!(
-                "PowerShell directory picker failed (exit {:?}): {}",
+                "Windows directory picker command `{command}` failed (exit {:?}): {}",
                 output.status.code(),
                 if stderr.is_empty() {
                     "unknown error"
@@ -953,6 +980,18 @@ async fn handle_command(
     match command {
         // App settings (need app_settings_sync)
         "get_app_settings" => Ok(to_json_or_panic(app_settings_sync.get()?.clone())),
+        // AI configuration and streaming (application-global, never project-scoped)
+        "get_ai_configuration" => but_api::ai::get_ai_configuration().map(|r| json!(r)),
+        "update_ai_configuration" => deserialize_json::<ai::UpdateCommand>(request.params)
+            .and_then(|params| {
+                but_api::ai::update_ai_configuration(params.update).map(|r| json!(r))
+            }),
+        "clear_openai_api_key" => but_api::ai::clear_openai_api_key()
+            .and_then(|_| but_api::ai::get_ai_configuration())
+            .map(|r| json!(r)),
+        "reset_ai_configuration" => but_api::ai::reset_ai_configuration().map(|r| json!(r)),
+        "stream_configured_ai_response" => deserialize_json::<ai::StreamCommand>(request.params)
+            .and_then(|params| ai::start_stream(params.request, broadcaster.clone())),
         "update_onboarding_complete" => deserialize_json(request.params).and_then(|params| {
             legacy::settings::update_onboarding_complete(&app_settings_sync, params)
                 .map(|r| json!(r))
@@ -1317,5 +1356,13 @@ mod tests {
 
         // Empty
         assert!(!is_localhost_host(b""));
+    }
+
+    #[test]
+    fn windows_powershell_candidates_preserve_compatibility_and_include_pwsh() {
+        assert_eq!(
+            windows_powershell_command_candidates(),
+            &["powershell", "powershell.exe", "pwsh", "pwsh.exe"]
+        );
     }
 }

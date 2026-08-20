@@ -18,7 +18,7 @@ use but_api::{
 };
 use but_settings::AppSettingsWithDiskSync;
 use gitbutler_tauri::{
-    WindowState, askpass, csp::csp_with_extras, env, logs, menu, projects, settings, zip,
+    WindowState, ai, askpass, csp::csp_with_extras, env, logs, menu, projects, settings, zip,
 };
 use tauri::{Emitter, Manager, generate_context};
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -364,6 +364,10 @@ fn main() -> anyhow::Result<()> {
                 settings::update_fetch,
                 settings::update_reviews,
                 settings::update_ui,
+                ai::get_ai_configuration,
+                ai::update_ai_configuration,
+                ai::clear_openai_api_key,
+                ai::stream_configured_ai_response,
                 // Debug-only - not for production!
                 #[cfg(debug_assertions)]
                 env::env_vars,

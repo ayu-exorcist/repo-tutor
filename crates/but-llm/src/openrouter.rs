@@ -7,10 +7,11 @@ use serde::de::DeserializeOwned;
 
 use crate::{
     chat::ChatMessage,
-    client::LLMClient,
+    client::{LLMClient, StreamResponseOptions},
     openai_utils::{
         OpenAIClientProvider, response_blocking, stream_response_blocking,
-        structured_output_blocking, tool_calling_loop, tool_calling_loop_stream,
+        stream_response_blocking_with_options, structured_output_blocking, tool_calling_loop,
+        tool_calling_loop_stream,
     },
 };
 
@@ -115,6 +116,24 @@ impl LLMClient for OpenRouterProvider {
         on_token: impl Fn(&str) + Send + Sync + 'static,
     ) -> Result<Option<String>> {
         stream_response_blocking(self, system_message, chat_messages, model, on_token)
+    }
+
+    fn stream_response_with_options(
+        &self,
+        system_message: &str,
+        chat_messages: Vec<ChatMessage>,
+        model: &str,
+        options: StreamResponseOptions,
+        on_token: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Result<Option<String>> {
+        stream_response_blocking_with_options(
+            self,
+            system_message,
+            chat_messages,
+            model,
+            options,
+            on_token,
+        )
     }
 
     fn structured_output<

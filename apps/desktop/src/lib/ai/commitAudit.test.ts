@@ -1,0 +1,314 @@
+import {
+	INSUFFICIENT_MOTIVATION,
+	INSUFFICIENT_TRADEOFFS,
+	CommitAuditValidationError,
+	createCommitAuditContract,
+	normalizeCommitIds,
+	parseCommitAuditReport,
+	renderCommitAuditPrompt,
+	validateCommitAuditReport,
+	type CommitAuditMaterial,
+} from "$lib/ai/commitAudit";
+import { describe, expect, test } from "vitest";
+
+const oneCommitMaterial: CommitAuditMaterial = {
+	commits: [
+		{
+			id: "abc123",
+			message: "fix parser boundary",
+			metadata: { author: "Ada", committedAt: "2026-08-19T00:00:00Z" },
+			files: [
+				{
+					path: "src/parser.ts",
+					patch: "@@ -1,1 +1,2 @@",
+					hunks: [{ id: "abc123:src/parser.ts:0", header: "@@ -1,1 +1,2 @@", patch: "+guard" }],
+				},
+			],
+		},
+	],
+	missingMaterials: ["Binary patch for assets/logo.png is unavailable."],
+};
+
+const twoCommitMaterial: CommitAuditMaterial = {
+	...oneCommitMaterial,
+	commits: [
+		...oneCommitMaterial.commits,
+		{
+			id: "def456",
+			message: "add parser test",
+			metadata: { author: "Ada", committedAt: "2026-08-19T00:01:00Z" },
+			files: [
+				{
+					path: "src/parser.test.ts",
+					patch: "@@ -4,0 +5,1 @@",
+					hunks: [{ id: "def456:src/parser.test.ts:0", header: "@@ -4,0 +5,1 @@", patch: "+test" }],
+				},
+			],
+		},
+	],
+};
+
+const evidence = { commitId: "abc123", path: "src/parser.ts", hunk: "abc123:src/parser.ts:0" };
+
+function fact(text = "解析器现在拒绝无效边界。", citedEvidence = [evidence]) {
+	return { text, evidence: citedEvidence };
+}
+
+function inference(text = "(推测)该变更用于防止边界输入导致异常。") {
+	return { isInference: true, text };
+}
+
+function changeCategories() {
+	return ["bug修复"];
+}
+
+function adversarialReview() {
+	return {
+		hiddenAssumptions: inference("(推测)守卫依赖所有无效边界均会进入该分支。"),
+		temporarySolution: inference("(推测)材料不足以确认该守卫是否为临时过渡方案。"),
+	};
+}
+
+function commitReport(
+	commitHash = "abc123",
+	overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+	const materialCommit =
+		oneCommitMaterial.commits.find((commit) => commit.id === commitHash) ??
+		twoCommitMaterial.commits[1];
+	if (!materialCommit) throw new Error("test fixture must include a fallback commit");
+	return {
+		commitHash,
+		metadata: {
+			author: materialCommit.metadata.author,
+			committedAt: materialCommit.metadata.committedAt,
+			message: materialCommit.message,
+		},
+		changeCategories: changeCategories(),
+		objectiveChanges: [fact()],
+		motivation: INSUFFICIENT_MOTIVATION,
+		tradeoffs: INSUFFICIENT_TRADEOFFS,
+		risks: [inference("(推测)缺少更广泛输入的回归覆盖。")],
+		relatedClues: [],
+		adversarialReview: adversarialReview(),
+		squashWarning: inference("(推测)材料不足，无法判断是否应与相邻提交 squash。"),
+		...overrides,
+	};
+}
+
+function evolutionSummary() {
+	return {
+		businessAndDesignGoals: inference("(推测)目标是使解析器边界行为可预测。"),
+		iterationPath: inference("(推测)先加入守卫，再补充覆盖。"),
+		tradeoffsAndDebt: inference("(推测)尚未看到性能权衡材料。"),
+		unexplainedDecisions: inference("(推测)为何只覆盖该边界仍不明确。"),
+		temporaryApproaches: inference("(推测)材料不足以确认是否存在临时方案。"),
+	};
+}
+
+describe("commit audit contract", () => {
+	test("normalizes duplicate commit IDs while preserving first-seen order", () => {
+		expect(normalizeCommitIds([" abc123 ", "def456", "abc123", "", " def456 "])).toEqual([
+			"abc123",
+			"def456",
+		]);
+	});
+
+	test("renders a JSON-only Chinese prompt with structural, squash, evidence, and cleanup rules", () => {
+		const prompt = renderCommitAuditPrompt(oneCommitMaterial);
+
+		expect(prompt).toContain("只输出一个可解析的 JSON 对象");
+		expect(prompt).toContain("禁止 Markdown");
+		expect(prompt).toContain("squashWarning 是每个 commit 的硬性必填字段");
+		expect(prompt).toContain("清理 text 的首尾空白");
+		expect(prompt).toContain("只根据下面提供的审计材料");
+		expect(prompt).toContain("禁止 evolutionSummary 字段");
+		expect(prompt).toContain(INSUFFICIENT_MOTIVATION);
+		expect(prompt).toContain(
+			"新功能、bug修复、代码重构、性能优化、依赖变更、文档调整、格式清理、热修复、其他",
+		);
+		expect(prompt).toContain("hiddenAssumptions");
+		expect(prompt).toContain("temporarySolution");
+	});
+
+	test("exposes a small prompt-and-parse contract for callers", () => {
+		const contract = createCommitAuditContract(oneCommitMaterial);
+		const report = { commits: [commitReport()] };
+
+		expect(contract.prompt).toContain("JSON");
+		expect(contract.parse(JSON.stringify(report))).toEqual(report);
+	});
+
+	test("accepts a complete single-commit report without an evolution summary", () => {
+		const report = { commits: [commitReport()] };
+
+		expect(parseCommitAuditReport(JSON.stringify(report), oneCommitMaterial)).toEqual(report);
+	});
+
+	test("requires all five evolution fields for multiple commits", () => {
+		const reports = [commitReport(), commitReport("def456")];
+		expect(() => validateCommitAuditReport({ commits: reports }, twoCommitMaterial)).toThrowError(
+			/evolutionSummary is required and must contain all five fields/,
+		);
+
+		const report = { commits: reports, evolutionSummary: evolutionSummary() };
+		expect(validateCommitAuditReport(report, twoCommitMaterial)).toEqual(report);
+
+		const { temporaryApproaches: _temporaryApproaches, ...incompleteEvolutionSummary } =
+			evolutionSummary();
+		expect(() =>
+			validateCommitAuditReport(
+				{ commits: reports, evolutionSummary: incompleteEvolutionSummary },
+				twoCommitMaterial,
+			),
+		).toThrowError(/must contain all five fields/);
+	});
+
+	test("forbids an evolution summary for a single commit", () => {
+		expect(() =>
+			validateCommitAuditReport(
+				{ commits: [commitReport()], evolutionSummary: evolutionSummary() },
+				oneCommitMaterial,
+			),
+		).toThrowError(/must be omitted for a single commit/);
+	});
+
+	test("requires complete per-commit fields and validates change categories", () => {
+		const { squashWarning: _squashWarning, ...missingField } = commitReport();
+		expect(() =>
+			validateCommitAuditReport({ commits: [missingField] }, oneCommitMaterial),
+		).toThrowError(/commits\[0\]\.squashWarning must be a fact or an inference object/);
+
+		const { committedAt: _committedAt, ...incompleteMetadata } = commitReport().metadata as Record<
+			string,
+			unknown
+		>;
+		expect(() =>
+			validateCommitAuditReport(
+				{ commits: [commitReport("abc123", { metadata: incompleteMetadata })] },
+				oneCommitMaterial,
+			),
+		).toThrowError(/must contain exactly author, committedAt, and message/);
+
+		expect(() =>
+			validateCommitAuditReport(
+				{ commits: [commitReport("abc123", { changeCategories: [] })] },
+				oneCommitMaterial,
+			),
+		).toThrowError(/changeCategories must be a non-empty array/);
+		expect(() =>
+			validateCommitAuditReport(
+				{ commits: [commitReport("abc123", { changeCategories: ["未知分类"] })] },
+				oneCommitMaterial,
+			),
+		).toThrowError(/changeCategories\[0\] must be a known change category/);
+		expect(() =>
+			validateCommitAuditReport(
+				{ commits: [commitReport("abc123", { changeCategories: ["bug修复", "bug修复"] })] },
+				oneCommitMaterial,
+			),
+		).toThrowError(/must not contain duplicate change categories/);
+
+		const { hiddenAssumptions: _hiddenAssumptions, ...missingHiddenAssumptions } =
+			adversarialReview();
+		expect(() =>
+			validateCommitAuditReport(
+				{
+					commits: [commitReport("abc123", { adversarialReview: missingHiddenAssumptions })],
+				},
+				oneCommitMaterial,
+			),
+		).toThrowError(
+			/adversarialReview must contain exactly hiddenAssumptions and temporarySolution/,
+		);
+
+		const { temporarySolution: _temporarySolution, ...missingTemporarySolution } =
+			adversarialReview();
+		expect(() =>
+			validateCommitAuditReport(
+				{
+					commits: [commitReport("abc123", { adversarialReview: missingTemporarySolution })],
+				},
+				oneCommitMaterial,
+			),
+		).toThrowError(
+			/adversarialReview must contain exactly hiddenAssumptions and temporarySolution/,
+		);
+	});
+
+	test("enforces inference marker and exact insufficient-information sentinels", () => {
+		expect(() =>
+			validateCommitAuditReport(
+				{
+					commits: [
+						commitReport("abc123", {
+							motivation: "信息不足",
+							tradeoffs: { isInference: true, text: "可能有取舍" },
+						}),
+					],
+				},
+				oneCommitMaterial,
+			),
+		).toThrowError(/motivation must be a fact or an inference object/);
+
+		let error: unknown;
+		try {
+			validateCommitAuditReport(
+				{
+					commits: [
+						commitReport("abc123", {
+							motivation: inference("(推测)提交消息表明修复边界。"),
+							tradeoffs: { isInference: true, text: "可能有取舍" },
+						}),
+					],
+				},
+				oneCommitMaterial,
+			);
+		} catch (caught) {
+			error = caught;
+		}
+		expect(error).toBeInstanceOf(CommitAuditValidationError);
+		expect((error as CommitAuditValidationError).issues).toContain(
+			"commits[0].tradeoffs inference text must start with (推测) and be non-empty",
+		);
+	});
+
+	test("rejects fabricated evidence in objective changes and risk items", () => {
+		const fabricatedEvidence = [{ commitId: "unknown", path: "src/other.ts", hunk: "@@" }];
+		let error: unknown;
+		try {
+			validateCommitAuditReport(
+				{
+					commits: [
+						commitReport("abc123", {
+							objectiveChanges: [fact("伪造目标", fabricatedEvidence)],
+							risks: [fact("伪造风险", fabricatedEvidence)],
+						}),
+					],
+				},
+				oneCommitMaterial,
+			);
+		} catch (caught) {
+			error = caught;
+		}
+		expect(error).toBeInstanceOf(CommitAuditValidationError);
+		expect((error as CommitAuditValidationError).issues).toEqual(
+			expect.arrayContaining([
+				"commits[0].objectiveChanges[0].evidence[0] is not in the audit material",
+				"commits[0].risks[0].evidence[0] is not in the audit material",
+			]),
+		);
+	});
+
+	test("rejects missing, unknown, and duplicate commit reports", () => {
+		expect(() => validateCommitAuditReport({ commits: [] }, oneCommitMaterial)).toThrowError(
+			/missing report for abc123/,
+		);
+		expect(() =>
+			validateCommitAuditReport({ commits: [commitReport("unknown")] }, oneCommitMaterial),
+		).toThrowError(/commitHash is not a normalized input commit/);
+		expect(() =>
+			validateCommitAuditReport({ commits: [commitReport(), commitReport()] }, oneCommitMaterial),
+		).toThrowError(/contains duplicate reports for abc123/);
+	});
+});

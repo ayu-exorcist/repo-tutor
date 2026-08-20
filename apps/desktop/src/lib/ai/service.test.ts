@@ -1,5 +1,12 @@
 import { AnthropicAIClient } from "$lib/ai/anthropicClient";
+import { BackendAiClient } from "$lib/ai/backendAiClient";
 import { ButlerAIClient } from "$lib/ai/butlerClient";
+import {
+	CommitAuditValidationError,
+	INSUFFICIENT_MOTIVATION,
+	INSUFFICIENT_TRADEOFFS,
+	type CommitAuditMaterial,
+} from "$lib/ai/commitAudit";
 import { OpenAIClient } from "$lib/ai/openAIClient";
 import {
 	SHORT_DEFAULT_BRANCH_TEMPLATE,
@@ -16,12 +23,14 @@ import {
 } from "$lib/ai/service";
 import {
 	AnthropicModelName,
+	MessageRole,
 	ModelKind,
 	OpenAIModelName,
 	type AIClient,
 	type Prompt,
 } from "$lib/ai/types";
 import { GitConfigService } from "$lib/config/gitConfigService";
+import type { IBackend } from "$lib/backend/backend";
 import { mockCreateBackend } from "$lib/testing/mockBackend";
 import { TokenMemoryService } from "$lib/user/tokenMemoryService";
 import { HttpClient } from "@gitbutler/shared/network/httpClient";
@@ -29,6 +38,8 @@ import { expect, test, describe, vi } from "vitest";
 import type { SecretsService } from "$lib/secrets/secretsService";
 import type { AppDispatch } from "$lib/state/clientState.svelte";
 import type { GitConfigSettings } from "@gitbutler/but-sdk";
+
+const dummyBackend = {} as IBackend;
 
 const defaultGitConfig = Object.freeze({
 	[GitAIConfigKey.ModelProvider]: ModelKind.OpenAI,
@@ -149,6 +160,73 @@ const hunk2 = {
 
 const exampleDiffs: DiffInput[] = [hunk1, hunk2];
 
+const commitAuditMaterial: CommitAuditMaterial = {
+	commits: [
+		{
+			id: "abc123",
+			message: "fix parser boundary",
+			metadata: { author: "Ada", committedAt: "2026-08-19T00:00:00Z" },
+			files: [
+				{
+					path: "src/parser.ts",
+					patch: "@@ -1,1 +1,2 @@",
+					hunks: [
+						{
+							id: "abc123:src/parser.ts:0",
+							header: "@@ -1,1 +1,2 @@",
+							patch: "+guard",
+						},
+					],
+				},
+			],
+		},
+	],
+	missingMaterials: [],
+};
+
+const commitAuditEvidence = {
+	commitId: "abc123",
+	path: "src/parser.ts",
+	hunk: "abc123:src/parser.ts:0",
+};
+
+function commitAuditReport() {
+	return {
+		commits: [
+			{
+				commitHash: "abc123",
+				metadata: {
+					author: "Ada",
+					committedAt: "2026-08-19T00:00:00Z",
+					message: "fix parser boundary",
+				},
+				changeCategories: ["bug修复"],
+				objectiveChanges: [
+					{
+						text: "解析器新增了边界保护。",
+						evidence: [commitAuditEvidence],
+					},
+				],
+				motivation: INSUFFICIENT_MOTIVATION,
+				tradeoffs: INSUFFICIENT_TRADEOFFS,
+				risks: [],
+				relatedClues: [],
+				adversarialReview: {
+					hiddenAssumptions: {
+						isInference: true,
+						text: "(推测)守卫依赖所有无效边界均会进入该分支。",
+					},
+					temporarySolution: {
+						isInference: true,
+						text: "(推测)材料不足以确认该守卫是否为临时过渡方案。",
+					},
+				},
+				squashWarning: { isInference: true, text: "(推测)材料不足以判断是否应 squash。" },
+			},
+		],
+	};
+}
+
 function buildDefaultServices() {
 	const gitConfig = new DummyGitConfigService(structuredClone(defaultGitConfig));
 	const secretsService = new DummySecretsService(structuredClone(defaultSecretsConfig));
@@ -157,7 +235,7 @@ function buildDefaultServices() {
 	const cloud = new HttpClient(fetchMock, "https://www.example.com", tokenMemoryService.token);
 	return {
 		tokenMemoryService,
-		aiService: new AIService(gitConfig, secretsService, cloud, tokenMemoryService),
+		aiService: new AIService(gitConfig, secretsService, cloud, tokenMemoryService, dummyBackend),
 	};
 }
 
@@ -180,7 +258,7 @@ describe("AIService", () => {
 			tokenMemoryService.setToken(undefined);
 		});
 
-		test("When token is bring your own, When a openAI token is present. It returns OpenAIClient", async () => {
+		test("When OpenAI uses a bring-your-own key, it returns BackendAiClient", async () => {
 			const gitConfig = new DummyGitConfigService({
 				...defaultGitConfig,
 				[GitAIConfigKey.OpenAIKeyOption]: KeyOption.BringYourOwn,
@@ -189,12 +267,18 @@ describe("AIService", () => {
 			const tokenMemoryService = new TokenMemoryService();
 			const fetchMock = vi.fn();
 			const cloud = new HttpClient(fetchMock, "https://www.example.com", tokenMemoryService.token);
-			const aiService = new AIService(gitConfig, secretsService, cloud, tokenMemoryService);
+			const aiService = new AIService(
+				gitConfig,
+				secretsService,
+				cloud,
+				tokenMemoryService,
+				dummyBackend,
+			);
 
-			expect(await aiService.buildClient()).toBeInstanceOf(OpenAIClient);
+			expect(await aiService.buildClient()).toBeInstanceOf(BackendAiClient);
 		});
 
-		test("When token is bring your own, When a openAI token is blank. It returns undefined", async () => {
+		test("When OpenAI uses a bring-your-own key, it does not read the key in the renderer", async () => {
 			const gitConfig = new DummyGitConfigService({
 				...defaultGitConfig,
 				[GitAIConfigKey.OpenAIKeyOption]: KeyOption.BringYourOwn,
@@ -203,13 +287,17 @@ describe("AIService", () => {
 			const tokenMemoryService = new TokenMemoryService();
 			const fetchMock = vi.fn();
 			const cloud = new HttpClient(fetchMock, "https://www.example.com", tokenMemoryService.token);
-			const aiService = new AIService(gitConfig, secretsService, cloud, tokenMemoryService);
-
-			await expect(aiService.buildClient.bind(aiService)).rejects.toThrowError(
-				new Error(
-					"When using OpenAI in a bring your own key configuration, you must provide a valid token",
-				),
+			const aiService = new AIService(
+				gitConfig,
+				secretsService,
+				cloud,
+				tokenMemoryService,
+				dummyBackend,
 			);
+			const getSecret = vi.spyOn(secretsService, "get");
+
+			expect(await aiService.buildClient()).toBeInstanceOf(BackendAiClient);
+			expect(getSecret).not.toHaveBeenCalledWith(AISecretHandle.OpenAIKey);
 		});
 
 		test("When ai provider is Anthropic, When token is bring your own, When an anthropic token is present. It returns AnthropicAIClient", async () => {
@@ -224,7 +312,13 @@ describe("AIService", () => {
 			const tokenMemoryService = new TokenMemoryService();
 			const fetchMock = vi.fn();
 			const cloud = new HttpClient(fetchMock, "https://www.example.com", tokenMemoryService.token);
-			const aiService = new AIService(gitConfig, secretsService, cloud, tokenMemoryService);
+			const aiService = new AIService(
+				gitConfig,
+				secretsService,
+				cloud,
+				tokenMemoryService,
+				dummyBackend,
+			);
 
 			expect(await aiService.buildClient()).toBeInstanceOf(AnthropicAIClient);
 		});
@@ -239,7 +333,13 @@ describe("AIService", () => {
 			const tokenMemoryService = new TokenMemoryService();
 			const fetchMock = vi.fn();
 			const cloud = new HttpClient(fetchMock, "https://www.example.com", tokenMemoryService.token);
-			const aiService = new AIService(gitConfig, secretsService, cloud, tokenMemoryService);
+			const aiService = new AIService(
+				gitConfig,
+				secretsService,
+				cloud,
+				tokenMemoryService,
+				dummyBackend,
+			);
 
 			await expect(aiService.buildClient.bind(aiService)).rejects.toThrowError(
 				new Error(
@@ -259,7 +359,13 @@ describe("AIService", () => {
 			const tokenMemoryService = new TokenMemoryService();
 			const fetchMock = vi.fn();
 			const cloud = new HttpClient(fetchMock, "https://www.example.com", tokenMemoryService.token);
-			const aiService = new AIService(gitConfig, secretsService, cloud, tokenMemoryService);
+			const aiService = new AIService(
+				gitConfig,
+				secretsService,
+				cloud,
+				tokenMemoryService,
+				dummyBackend,
+			);
 
 			expect(await aiService.buildClient()).toBeInstanceOf(OpenAIClient);
 		});
@@ -273,7 +379,13 @@ describe("AIService", () => {
 			const tokenMemoryService = new TokenMemoryService();
 			const fetchMock = vi.fn();
 			const cloud = new HttpClient(fetchMock, "https://www.example.com", tokenMemoryService.token);
-			const aiService = new AIService(gitConfig, secretsService, cloud, tokenMemoryService);
+			const aiService = new AIService(
+				gitConfig,
+				secretsService,
+				cloud,
+				tokenMemoryService,
+				dummyBackend,
+			);
 
 			await expect(aiService.buildClient.bind(aiService)).rejects.toThrowError(
 				new Error("When using OpenRouter, you must provide a valid API key"),
@@ -291,7 +403,13 @@ describe("AIService", () => {
 			const tokenMemoryService = new TokenMemoryService();
 			const fetchMock = vi.fn();
 			const cloud = new HttpClient(fetchMock, "https://www.example.com", tokenMemoryService.token);
-			const aiService = new AIService(gitConfig, secretsService, cloud, tokenMemoryService);
+			const aiService = new AIService(
+				gitConfig,
+				secretsService,
+				cloud,
+				tokenMemoryService,
+				dummyBackend,
+			);
 
 			expect(await aiService.getOpenAIModelName()).toBe(OpenAIModelName.GPT54);
 		});
@@ -299,15 +417,21 @@ describe("AIService", () => {
 		test("When a legacy/unknown model is stored, it falls back to the default", async () => {
 			const gitConfig = new DummyGitConfigService({
 				...defaultGitConfig,
-				[GitAIConfigKey.OpenAIModelName]: "gpt-4-turbo",
+				[GitAIConfigKey.OpenAIModelName]: "relay-model",
 			});
 			const secretsService = new DummySecretsService();
 			const tokenMemoryService = new TokenMemoryService();
 			const fetchMock = vi.fn();
 			const cloud = new HttpClient(fetchMock, "https://www.example.com", tokenMemoryService.token);
-			const aiService = new AIService(gitConfig, secretsService, cloud, tokenMemoryService);
+			const aiService = new AIService(
+				gitConfig,
+				secretsService,
+				cloud,
+				tokenMemoryService,
+				dummyBackend,
+			);
 
-			expect(await aiService.getOpenAIModelName()).toBe(OpenAIModelName.GPT54Nano);
+			expect(await aiService.getOpenAIModelName()).toBe("relay-model");
 		});
 	});
 
@@ -321,7 +445,13 @@ describe("AIService", () => {
 			const tokenMemoryService = new TokenMemoryService();
 			const fetchMock = vi.fn();
 			const cloud = new HttpClient(fetchMock, "https://www.example.com", tokenMemoryService.token);
-			const aiService = new AIService(gitConfig, secretsService, cloud, tokenMemoryService);
+			const aiService = new AIService(
+				gitConfig,
+				secretsService,
+				cloud,
+				tokenMemoryService,
+				dummyBackend,
+			);
 
 			expect(await aiService.getAnthropicModelName()).toBe(AnthropicModelName.Opus);
 		});
@@ -335,9 +465,70 @@ describe("AIService", () => {
 			const tokenMemoryService = new TokenMemoryService();
 			const fetchMock = vi.fn();
 			const cloud = new HttpClient(fetchMock, "https://www.example.com", tokenMemoryService.token);
-			const aiService = new AIService(gitConfig, secretsService, cloud, tokenMemoryService);
+			const aiService = new AIService(
+				gitConfig,
+				secretsService,
+				cloud,
+				tokenMemoryService,
+				dummyBackend,
+			);
 
 			expect(await aiService.getAnthropicModelName()).toBe(AnthropicModelName.Haiku);
+		});
+	});
+
+	describe("#analyzeCommitAudit", () => {
+		test("parses a valid structured commit audit report", async () => {
+			const { aiService } = buildDefaultServices();
+			const report = commitAuditReport();
+			const client = new DummyAIClient();
+			const evaluate = vi.spyOn(client, "evaluate").mockResolvedValue(JSON.stringify(report));
+			const onToken = vi.fn();
+
+			vi.spyOn(aiService, "buildClient").mockResolvedValue(client);
+
+			expect(
+				await aiService.analyzeCommitAudit({ material: commitAuditMaterial, onToken }),
+			).toEqual(report);
+			expect(evaluate).toHaveBeenCalledWith(
+				[{ role: MessageRole.User, content: expect.stringContaining("审计材料") }],
+				{ onToken },
+			);
+		});
+
+		test("retries when the first response fails validation and parses the second response", async () => {
+			const { aiService } = buildDefaultServices();
+			const report = commitAuditReport();
+			const client = new DummyAIClient();
+			const evaluate = vi
+				.spyOn(client, "evaluate")
+				.mockResolvedValueOnce("{}")
+				.mockResolvedValueOnce(JSON.stringify(report));
+
+			vi.spyOn(aiService, "buildClient").mockResolvedValue(client);
+
+			expect(await aiService.analyzeCommitAudit({ material: commitAuditMaterial })).toEqual(report);
+			expect(evaluate).toHaveBeenCalledTimes(2);
+		});
+
+		test("throws CommitAuditValidationError after two invalid responses", async () => {
+			const { aiService } = buildDefaultServices();
+			const client = new DummyAIClient();
+			const evaluate = vi.spyOn(client, "evaluate").mockResolvedValue("{}");
+
+			vi.spyOn(aiService, "buildClient").mockResolvedValue(client);
+
+			await expect(
+				aiService.analyzeCommitAudit({ material: commitAuditMaterial }),
+			).rejects.toBeInstanceOf(CommitAuditValidationError);
+			expect(evaluate).toHaveBeenCalledTimes(2);
+		});
+
+		test("returns undefined when no AI client is available", async () => {
+			const { aiService } = buildDefaultServices();
+			vi.spyOn(aiService, "buildClient").mockResolvedValue(undefined);
+
+			expect(await aiService.analyzeCommitAudit({ material: commitAuditMaterial })).toBeUndefined();
 		});
 	});
 

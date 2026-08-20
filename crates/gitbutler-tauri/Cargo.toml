@@ -36,6 +36,7 @@ but-askpass.workspace = true
 but-action.workspace = true
 but-api = { workspace = true, features = ["tauri", "path-bytes", "legacy"] }
 but-ctx = { workspace = true, features = ["legacy"] }
+but-llm.workspace = true
 notify-rust.workspace = true
 
 gitbutler-watcher.workspace = true

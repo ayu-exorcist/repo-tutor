@@ -1,5 +1,11 @@
 import { AnthropicAIClient } from "$lib/ai/anthropicClient";
+import { BackendAiClient } from "$lib/ai/backendAiClient";
 import { ButlerAIClient } from "$lib/ai/butlerClient";
+import {
+	createCommitAuditContract,
+	type CommitAuditMaterial,
+	type CommitAuditReport,
+} from "$lib/ai/commitAudit";
 import { formatStagedChanges } from "$lib/ai/diffFormatting";
 import {
 	LM_STUDIO_DEFAULT_ENDPOINT,
@@ -32,6 +38,7 @@ import {
 import { splitMessage } from "$lib/commits/commitMessage";
 import { InjectionToken } from "@gitbutler/core/context";
 import { get } from "svelte/store";
+import type { IBackend } from "$lib/backend/backend";
 import type { GitConfigService } from "$lib/config/gitConfigService";
 import type { SecretsService } from "$lib/secrets/secretsService";
 import type { TokenMemoryService } from "$lib/user/tokenMemoryService";
@@ -69,6 +76,10 @@ export enum GitAIConfigKey {
 interface BaseAIServiceOpts {
 	userToken?: string;
 	onToken?: (token: string) => void;
+}
+
+interface AnalyzeCommitAuditOpts extends BaseAIServiceOpts {
+	material: CommitAuditMaterial;
 }
 
 interface SummarizeCommitOpts extends BaseAIServiceOpts {
@@ -132,6 +143,7 @@ export class AIService {
 		private secretsService: SecretsService,
 		private cloud: HttpClient,
 		private tokenMemoryService: TokenMemoryService,
+		private backend: IBackend,
 	) {}
 
 	async getModelKind() {
@@ -162,10 +174,7 @@ export class AIService {
 			GitAIConfigKey.OpenAIModelName,
 			defaultModel,
 		);
-		if (Object.values(OpenAIModelName).includes(storedValue as OpenAIModelName)) {
-			return storedValue as OpenAIModelName;
-		}
-		return defaultModel;
+		return storedValue.trim() || defaultModel;
 	}
 
 	async getAnthropicKeyOption() {
@@ -275,7 +284,11 @@ export class AIService {
 		if (await this.usingGitButlerAPI()) return !!get(this.tokenMemoryService.token);
 
 		const openAIActiveAndKeyProvided =
-			modelKind === ModelKind.OpenAI && !!(await this.getOpenAIKey());
+			modelKind === ModelKind.OpenAI &&
+			((await this.getOpenAIKeyOption()) === KeyOption.BringYourOwn
+				? (await this.backend.invoke<{ openaiHasApiKey: boolean }>("get_ai_configuration"))
+						.openaiHasApiKey
+				: !!(await this.getOpenAIKey()));
 		const anthropicActiveAndKeyProvided =
 			modelKind === ModelKind.Anthropic && !!(await this.getAnthropicKey());
 		const ollamaActiveAndEndpointProvided =
@@ -335,17 +348,7 @@ export class AIService {
 		}
 
 		if (modelKind === ModelKind.OpenAI) {
-			const openAIModelName = await this.getOpenAIModelName();
-			const openAIKey = await this.getOpenAIKey();
-			const openAICustomEndpoint = await this.getOpenAICustomEndpoint();
-
-			if (!openAIKey) {
-				throw new Error(
-					"When using OpenAI in a bring your own key configuration, you must provide a valid token",
-				);
-			}
-
-			return new OpenAIClient(openAIKey, openAIModelName, openAICustomEndpoint);
+			return new BackendAiClient(this.backend);
 		}
 
 		if (modelKind === ModelKind.Anthropic) {
@@ -373,6 +376,28 @@ export class AIService {
 		}
 
 		return undefined;
+	}
+
+	async analyzeCommitAudit({
+		material,
+		onToken,
+	}: AnalyzeCommitAuditOpts): Promise<CommitAuditReport | undefined> {
+		const aiClient = await this.buildClient();
+		if (!aiClient) return;
+
+		const contract = createCommitAuditContract(material);
+		const prompt: Prompt = [{ role: MessageRole.User, content: contract.prompt }];
+		const evaluateAndParse = async () => {
+			const response = await aiClient.evaluate(prompt, { onToken });
+			if (!response.trim()) throw new Error("Commit audit response was empty");
+			return contract.parse(response);
+		};
+
+		try {
+			return await evaluateAndParse();
+		} catch {
+			return await evaluateAndParse();
+		}
 	}
 
 	async summarizeCommit({

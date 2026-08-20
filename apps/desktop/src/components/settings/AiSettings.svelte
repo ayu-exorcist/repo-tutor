@@ -4,7 +4,8 @@
 	import AuthorizationBanner from "$components/settings/AuthorizationBanner.svelte";
 	import SettingsSection from "$components/shared/SettingsSection.svelte";
 	import { AISecretHandle, AI_SERVICE, GitAIConfigKey, KeyOption } from "$lib/ai/service";
-	import { OpenAIModelName, AnthropicModelName, ModelKind } from "$lib/ai/types";
+	import { AnthropicModelName, ModelKind } from "$lib/ai/types";
+	import { BACKEND } from "$lib/backend";
 	import { GIT_CONFIG_SERVICE } from "$lib/config/gitConfigService";
 	import { SECRET_SERVICE } from "$lib/secrets/secretsService";
 	import { USER_SERVICE } from "$lib/user/userService.svelte";
@@ -24,6 +25,7 @@
 	import { onMount, tick } from "svelte";
 	import { run } from "svelte/legacy";
 
+	const backend = inject(BACKEND);
 	const gitConfigService = inject(GIT_CONFIG_SERVICE);
 	const secretsService = inject(SECRET_SERVICE);
 	const aiService = inject(AI_SERVICE);
@@ -34,8 +36,9 @@
 	let openAIKeyOption: KeyOption | undefined = $state();
 	let anthropicKeyOption: KeyOption | undefined = $state();
 	let openAIKey: string | undefined = $state();
+	let openAIKeySaved = $state(false);
 	let openAICustomEndpoint: string | undefined = $state();
-	let openAIModelName: OpenAIModelName | undefined = $state();
+	let openAIModelName: string | undefined = $state();
 	let anthropicKey: string | undefined = $state();
 	let anthropicModelName: AnthropicModelName | undefined = $state();
 	let diffLengthLimit: number | undefined = $state();
@@ -61,7 +64,11 @@
 
 		openAIKeyOption = await aiService.getOpenAIKeyOption();
 		openAIModelName = await aiService.getOpenAIModelName();
-		openAIKey = await aiService.getOpenAIKey();
+		const aiConfiguration = await backend.invoke<{ openaiHasApiKey: boolean }>(
+			"get_ai_configuration",
+		);
+		openAIKeySaved = aiConfiguration.openaiHasApiKey;
+		openAIKey = undefined;
 		openAICustomEndpoint = await aiService.getOpenAICustomEndpoint();
 
 		anthropicKeyOption = await aiService.getAnthropicKeyOption();
@@ -96,21 +103,6 @@
 		},
 	];
 
-	const openAIModelOptions = [
-		{
-			label: "GPT 5.4",
-			value: OpenAIModelName.GPT54,
-		},
-		{
-			label: "GPT 5.4 Mini",
-			value: OpenAIModelName.GPT54Mini,
-		},
-		{
-			label: "GPT 5.4 Nano (recommended)",
-			value: OpenAIModelName.GPT54Nano,
-		},
-	];
-
 	const anthropicModelOptions = [
 		{
 			label: "Haiku (recommended)",
@@ -131,27 +123,80 @@
 	function onFormChange(form: HTMLFormElement) {
 		const formData = new FormData(form);
 		modelKind = formData.get("modelKind") as ModelKind;
+		if (modelKind === ModelKind.OpenAI) scheduleOpenAIConfigurationSave();
 	}
+
+	let openAISaveTimeout: ReturnType<typeof setTimeout> | undefined;
+	let openAISaveQueue = Promise.resolve();
+
+	async function saveOpenAIConfiguration(openaiApiKey?: string) {
+		if (
+			!initialized ||
+			modelKind !== ModelKind.OpenAI ||
+			!openAIKeyOption ||
+			!openAIModelName ||
+			(openAIKeyOption === KeyOption.BringYourOwn && !openAIKeySaved && !openaiApiKey?.trim())
+		) {
+			return;
+		}
+
+		const update = {
+			provider: modelKind,
+			openaiKeyOption: openAIKeyOption,
+			openaiModel: openAIModelName,
+			openaiCustomEndpoint: openAICustomEndpoint,
+			openaiApiKey,
+			anthropicKeyOption: anthropicKeyOption ?? KeyOption.ButlerAPI,
+			anthropicModel: anthropicModelName ?? AnthropicModelName.Haiku,
+			ollamaEndpoint: ollamaEndpoint ?? "",
+			ollamaModel: ollamaModel ?? "",
+			lmstudioEndpoint: lmStudioEndpoint ?? "",
+			lmstudioModel: lmStudioModel ?? "",
+		};
+
+		const save = openAISaveQueue
+			.catch(() => undefined)
+			.then(async () => {
+				if (modelKind !== ModelKind.OpenAI) return;
+				await backend.invoke("update_ai_configuration", { update });
+			});
+		openAISaveQueue = save;
+		await save;
+	}
+
+	function scheduleOpenAIConfigurationSave() {
+		clearTimeout(openAISaveTimeout);
+		openAISaveTimeout = setTimeout(() => {
+			openAISaveTimeout = undefined;
+			void saveOpenAIConfiguration();
+		}, 300);
+	}
+
+	async function saveOpenAIKey(value: string) {
+		const openaiApiKey = value.trim();
+		if (!openaiApiKey) return;
+
+		clearTimeout(openAISaveTimeout);
+		openAISaveTimeout = undefined;
+		await saveOpenAIConfiguration(openaiApiKey);
+		if (openAIKey === value) openAIKey = undefined;
+		openAIKeySaved = true;
+	}
+
 	run(() => {
-		setConfiguration(GitAIConfigKey.ModelProvider, modelKind);
+		if (modelKind !== ModelKind.OpenAI) {
+			setConfiguration(GitAIConfigKey.ModelProvider, modelKind);
+		}
 	});
 	run(() => {
-		setConfiguration(GitAIConfigKey.OpenAIKeyOption, openAIKeyOption);
+		if (modelKind !== ModelKind.OpenAI) {
+			setConfiguration(GitAIConfigKey.AnthropicKeyOption, anthropicKeyOption);
+		}
 	});
 	run(() => {
-		setConfiguration(GitAIConfigKey.OpenAIModelName, openAIModelName);
-	});
-	run(() => {
-		setConfiguration(GitAIConfigKey.OpenAICustomEndpoint, openAICustomEndpoint);
-	});
-	run(() => {
-		setSecret(AISecretHandle.OpenAIKey, openAIKey);
-	});
-	run(() => {
-		setConfiguration(GitAIConfigKey.AnthropicKeyOption, anthropicKeyOption);
-	});
-	run(() => {
-		setConfiguration(GitAIConfigKey.AnthropicModelName, anthropicModelName);
+		if (modelKind !== ModelKind.OpenAI) {
+			setConfiguration(GitAIConfigKey.AnthropicModelName, anthropicModelName);
+		}
 	});
 	run(() => {
 		setConfiguration(GitAIConfigKey.DiffLengthLimit, diffLengthLimit?.toString());
@@ -213,6 +258,7 @@
 					label="Do you want to provide your own key?"
 					onselect={(value) => {
 						openAIKeyOption = value as KeyOption;
+						scheduleOpenAIConfigurationSave();
 					}}
 				>
 					{#snippet itemSnippet({ item, highlighted })}
@@ -231,33 +277,32 @@
 				{/if}
 
 				{#if openAIKeyOption === KeyOption.BringYourOwn}
+					{#if openAIKeySaved}
+						{@render shortNote(
+							"An OpenAI API key is already saved. Enter a new key to replace it.",
+						)}
+					{/if}
 					<Textbox
 						label="API key"
 						type="password"
 						bind:value={openAIKey}
+						onchange={saveOpenAIKey}
 						required
 						placeholder="sk-..."
 					/>
 
-					<Select
-						value={openAIModelName}
-						options={openAIModelOptions}
+					<Textbox
 						label="Model version"
+						bind:value={openAIModelName}
+						onchange={scheduleOpenAIConfigurationSave}
 						wide
-						onselect={(value) => {
-							openAIModelName = value as OpenAIModelName;
-						}}
-					>
-						{#snippet itemSnippet({ item, highlighted })}
-							<SelectItem selected={item.value === openAIModelName} {highlighted}>
-								{item.label}
-							</SelectItem>
-						{/snippet}
-					</Select>
+						placeholder="gpt-5.4-nano or your relay model name"
+					/>
 
 					<Textbox
 						label="Custom endpoint"
 						bind:value={openAICustomEndpoint}
+						onchange={scheduleOpenAIConfigurationSave}
 						placeholder="https://api.openai.com/v1"
 					/>
 				{/if}

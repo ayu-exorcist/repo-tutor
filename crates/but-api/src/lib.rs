@@ -17,6 +17,9 @@ use but_workspace::RefInfo;
 #[cfg(feature = "legacy")]
 pub mod legacy;
 
+/// Application-global AI configuration and provider helpers.
+pub mod ai;
+
 /// Functions for GitHub authentication.
 pub mod github;
 

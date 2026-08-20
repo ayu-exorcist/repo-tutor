@@ -183,6 +183,20 @@ async function webRelaunch(): Promise<void> {
  * @returns A promise that resolves with the subject of the response if successful.
  * @throws Throws an error if the backend responds with an error or if the request fails.
  */
+function safeIpcParams(command: string, params: Record<string, unknown>): Record<string, unknown> {
+	if (command !== "update_ai_configuration") return params;
+	const update = params.update;
+	if (!update || typeof update !== "object") return params;
+	return {
+		...params,
+		update: {
+			...(update as Record<string, unknown>),
+			openaiApiKey: "<redacted>",
+			anthropicApiKey: "<redacted>",
+		},
+	};
+}
+
 async function webInvoke<T>(command: string, params: Record<string, unknown> = {}): Promise<T> {
 	try {
 		const response = await fetch(`${getApiBaseUrl()}/${command}`, {
@@ -197,7 +211,10 @@ async function webInvoke<T>(command: string, params: Record<string, unknown> = {
 			return out.subject;
 		} else {
 			if (isNormalizedError(out.subject)) {
-				console.error(`ipc->${command}: ${JSON.stringify(params)}`, out.subject);
+				console.error(
+					`ipc->${command}: ${JSON.stringify(safeIpcParams(command, params))}`,
+					out.subject,
+				);
 				throw new IpcError(out.subject, command);
 			}
 			throw out.subject;
@@ -206,7 +223,7 @@ async function webInvoke<T>(command: string, params: Record<string, unknown> = {
 		// Already wrapped on the explicit-throw path above; only the network
 		// / parse failure path lands here with a raw redux-shaped error.
 		if (isNormalizedError(error) && !(error instanceof IpcError)) {
-			console.error(`ipc->${command}: ${JSON.stringify(params)}`, error);
+			console.error(`ipc->${command}: ${JSON.stringify(safeIpcParams(command, params))}`, error);
 			throw new IpcError(error, command);
 		}
 		throw error;

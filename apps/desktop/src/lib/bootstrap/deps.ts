@@ -143,7 +143,13 @@ export function initDependencies(args: {
 	// ============================================================================
 
 	const aiPromptService = new AIPromptService();
-	const aiService = new AIService(gitConfig, secretsService, httpClient, tokenMemoryService);
+	const aiService = new AIService(
+		gitConfig,
+		secretsService,
+		httpClient,
+		tokenMemoryService,
+		backend,
+	);
 	const userService = new UserService(
 		clientState.backendApi,
 		backend,

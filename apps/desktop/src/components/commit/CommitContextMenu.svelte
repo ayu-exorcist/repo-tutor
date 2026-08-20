@@ -53,6 +53,7 @@
 </script>
 
 <script lang="ts">
+	import CommitAuditModal from "$components/commit/CommitAuditModal.svelte";
 	import { AI_SERVICE } from "$lib/ai/service";
 	import { CLIPBOARD_SERVICE } from "$lib/backend/clipboard";
 	import { URL_SERVICE } from "$lib/backend/url";
@@ -100,12 +101,21 @@
 	const commitHasConflicts = $derived(
 		contextData !== undefined && "hasConflicts" in contextData && !!contextData.hasConflicts,
 	);
+	const localStackId = $derived(
+		contextData?.commitStatus === "LocalAndRemote" || contextData?.commitStatus === "LocalOnly"
+			? contextData.stackId
+			: undefined,
+	);
 	let aiConfigurationValid = $state(false);
+	let commitAuditModal = $state<CommitAuditModal>();
 
 	// Validating the AI configuration costs several backend calls, so only do
-	// it for the rare rows that can actually offer the AI-resolve action.
+	// it for local commits that can actually offer an AI action.
 	$effect(() => {
-		if (!commitHasConflicts || !$aiGenEnabled) return;
+		if (!$aiGenEnabled || (!commitHasConflicts && !localStackId)) {
+			aiConfigurationValid = false;
+			return;
+		}
 		let stale = false;
 		aiService.validateConfiguration().then(
 			(valid) => {
@@ -126,6 +136,12 @@
 			? !contextData.stackId
 			: false,
 	);
+	const commitAuditUnavailableReason = $derived.by(() => {
+		if (!localStackId) return "提交不在本地 Stack 中，无法审计";
+		if (!$aiGenEnabled) return "请先在项目设置中启用 AI";
+		if (!aiConfigurationValid) return "请先完成 AI 配置";
+		return undefined;
+	});
 
 	async function insertBlankCommit(commitId: string, location: "above" | "below" = "below") {
 		await insertBlankCommitInBranch({
@@ -159,6 +175,11 @@
 			stackId,
 			projectId,
 		});
+	}
+
+	function openCommitAudit(commitIds: readonly string[]) {
+		if (!localStackId || commitAuditUnavailableReason) return;
+		commitAuditModal?.show(localStackId, [...commitIds]);
 	}
 
 	async function handleResolveConflictsAi(commitId: string, stackId: string) {
@@ -238,6 +259,16 @@
 								}
 							}}
 						/>
+						<ContextMenuItem
+							label="Analyze {multiSelect.commitIds.length} commits with AI"
+							icon="ai"
+							disabled={!!commitAuditUnavailableReason}
+							caption={commitAuditUnavailableReason}
+							onclick={() => {
+								openCommitAudit(multiSelect.commitIds);
+								close();
+							}}
+						/>
 					</ContextMenuSection>
 				{:else}
 					<!-- Single-commit actions -->
@@ -277,6 +308,16 @@
 									await handleEditPatch(commitId, contextData.stackId);
 									close();
 								}
+							}}
+						/>
+						<ContextMenuItem
+							label="Analyze commit with AI"
+							icon="ai"
+							disabled={!!commitAuditUnavailableReason}
+							caption={commitAuditUnavailableReason}
+							onclick={() => {
+								openCommitAudit([commitId]);
+								close();
 							}}
 						/>
 						{#if contextData.hasConflicts && $aiGenEnabled && aiConfigurationValid}
@@ -412,3 +453,5 @@
 		{/snippet}
 	</KebabButton>
 {/if}
+
+<CommitAuditModal bind:this={commitAuditModal} {projectId} />

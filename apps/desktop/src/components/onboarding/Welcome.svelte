@@ -5,6 +5,7 @@
 	import IconLink from "$components/shared/IconLink.svelte";
 	import cloneRepoSvg from "$lib/assets/welcome/clone-repo.svg?raw";
 	import newProjectSvg from "$lib/assets/welcome/new-local-project.svg?raw";
+	import { showError } from "$lib/error/showError";
 	import { handleAddProjectOutcome } from "$lib/project/project";
 	import { PROJECTS_SERVICE } from "$lib/project/projectsService";
 	import { OnboardingEvent, POSTHOG_WRAPPER } from "$lib/telemetry/posthog";
@@ -31,6 +32,7 @@
 			}
 		} catch (e: unknown) {
 			posthog.captureOnboarding(OnboardingEvent.AddLocalProjectFailed, e);
+			showError("Failed to add local project", e);
 		} finally {
 			newProjectLoading = false;
 		}

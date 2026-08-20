@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use but_api_macros::but_api;
 use but_secret::{Sensitive, secret};
 use tracing::instrument;
@@ -8,6 +8,9 @@ use tracing::instrument;
 #[but_api]
 #[instrument(err(Debug))]
 pub fn secret_get_global(handle: String) -> Result<Option<String>> {
+    if handle == "aiOpenAIKey" {
+        bail!("AI provider keys can only be used through the AI backend");
+    }
     let sensitive = secret::retrieve(&handle, secret::Namespace::Global)?.map(|s| s.0);
     Ok(sensitive)
 }

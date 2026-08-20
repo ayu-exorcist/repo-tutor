@@ -218,7 +218,7 @@ impl AiConfiguration {
     }
 
     pub fn apply(&self, config: &mut gix::config::File) -> Result<()> {
-        self.validate()?;
+        self.validate_active()?;
         set_config_value(
             config,
             AI_MODEL_PROVIDER_KEY,
@@ -408,6 +408,9 @@ fn validate_url(value: &str, field: &str) -> Result<()> {
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         bail!("{field} must be an HTTP or HTTPS URL")
     }
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("{field} must not contain URL userinfo")
+    }
     Ok(())
 }
 
@@ -475,6 +478,17 @@ mod tests {
     }
 
     #[test]
+    fn applying_active_openai_configuration_ignores_unused_ollama_settings() {
+        let mut configuration = AiConfiguration::default();
+        configuration.provider = LLMProviderKind::OpenAi;
+        configuration.ollama.endpoint = "missing-host-port".into();
+        let mut config =
+            gix::config::File::new(gix::config::file::Metadata::from(gix::config::Source::User));
+
+        configuration.apply(&mut config).unwrap();
+    }
+
+    #[test]
     fn custom_openai_endpoint_only_applies_to_own_keys() {
         let mut configuration = AiConfiguration::default();
         configuration.openai.custom_endpoint = Some("not a URL".into());
@@ -488,6 +502,22 @@ mod tests {
         assert!(
             configuration.validate().is_err(),
             "own-key endpoints must remain valid URLs"
+        );
+    }
+
+    #[test]
+    fn custom_endpoints_reject_url_userinfo() {
+        let mut config = AiConfiguration::default();
+        config.openai.key_option = CredentialsKeyOption::BringYourOwn;
+        config.openai.custom_endpoint = Some("https://user:password@example.com/v1".into());
+        let error = config.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("userinfo"),
+            "endpoint validation must reject URL credentials"
+        );
+        assert!(
+            !error.contains("password"),
+            "endpoint errors must not echo URL credentials"
         );
     }
 

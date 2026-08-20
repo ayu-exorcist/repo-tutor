@@ -8,7 +8,8 @@ use async_openai::{
         ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessageContent,
         ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
         ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessageContent,
-        CreateChatCompletionRequestArgs, ResponseFormat, ResponseFormatJsonSchema,
+        CreateChatCompletionRequest, CreateChatCompletionRequestArgs, ResponseFormat,
+        ResponseFormatJsonSchema,
     },
 };
 use but_tools::tool::Toolset;
@@ -18,8 +19,8 @@ use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
 
 use crate::{
-    ChatMessage, StreamToolCallResult, ToolCall, ToolCallContent, ToolResponseContent,
-    chat::ConversationResult,
+    ChatMessage, StreamResponseOptions, StreamToolCallResult, ToolCall, ToolCallContent,
+    ToolResponseContent, chat::ConversationResult,
 };
 
 pub trait OpenAIClientProvider {
@@ -146,27 +147,104 @@ pub fn stream_response_blocking(
     model: &str,
     on_token: impl Fn(&str) + Send + Sync + 'static,
 ) -> anyhow::Result<Option<String>> {
-    let mut messages: Vec<ChatCompletionRequestMessage> =
-        vec![ChatCompletionRequestSystemMessage::from(system_message).into()];
+    stream_response_blocking_inner(
+        provider,
+        system_message,
+        chat_messages,
+        model,
+        StreamResponseOptions::default(),
+        false,
+        on_token,
+    )
+}
 
-    messages.extend(
-        chat_messages
-            .into_iter()
-            .map(ChatCompletionRequestMessage::from)
-            .collect::<Vec<_>>(),
-    );
+pub fn stream_response_blocking_with_options(
+    provider: &impl OpenAIClientProvider,
+    system_message: &str,
+    chat_messages: Vec<ChatMessage>,
+    model: &str,
+    options: StreamResponseOptions,
+    on_token: impl Fn(&str) + Send + Sync + 'static,
+) -> anyhow::Result<Option<String>> {
+    stream_response_blocking_inner(
+        provider,
+        system_message,
+        chat_messages,
+        model,
+        options,
+        true,
+        on_token,
+    )
+}
 
+fn stream_response_blocking_inner(
+    provider: &impl OpenAIClientProvider,
+    system_message: &str,
+    chat_messages: Vec<ChatMessage>,
+    model: &str,
+    options: StreamResponseOptions,
+    validate_input: bool,
+    on_token: impl Fn(&str) + Send + Sync + 'static,
+) -> anyhow::Result<Option<String>> {
+    if validate_input {
+        validate_stream_input(system_message, &chat_messages, model)?;
+    }
+    let messages = chat_completion_messages(system_message, chat_messages);
     let client = provider.client()?;
-    let messages_owned = messages.clone();
     let model = model.to_string();
 
     std::thread::spawn(move || {
         tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(stream_response(&client, messages_owned, model, on_token))
+            .block_on(stream_response(
+                &client,
+                messages,
+                model,
+                options.max_tokens,
+                on_token,
+            ))
     })
     .join()
     .unwrap()
+}
+
+fn chat_completion_messages(
+    system_message: &str,
+    chat_messages: Vec<ChatMessage>,
+) -> Vec<ChatCompletionRequestMessage> {
+    let mut messages: Vec<ChatCompletionRequestMessage> =
+        vec![ChatCompletionRequestSystemMessage::from(system_message).into()];
+    messages.extend(
+        chat_messages
+            .into_iter()
+            .map(ChatCompletionRequestMessage::from),
+    );
+    messages
+}
+
+fn validate_stream_input(
+    system_message: &str,
+    chat_messages: &[ChatMessage],
+    model: &str,
+) -> anyhow::Result<()> {
+    if system_message.trim().is_empty() {
+        anyhow::bail!("System message is required")
+    }
+    if model.trim().is_empty() {
+        anyhow::bail!("Model is required")
+    }
+    if chat_messages.is_empty() {
+        anyhow::bail!("Prompt is required")
+    }
+    if chat_messages.iter().any(|message| {
+        matches!(
+            message,
+            ChatMessage::User(content) | ChatMessage::Assistant(content) if content.trim().is_empty()
+        )
+    }) {
+        anyhow::bail!("Prompt messages must not be empty")
+    }
+    Ok(())
 }
 
 pub fn tool_calling_stream_blocking(
@@ -596,17 +674,27 @@ async fn tool_calling(
     Ok(response)
 }
 
+fn build_stream_request(
+    messages: Vec<ChatCompletionRequestMessage>,
+    model: String,
+    max_tokens: Option<u32>,
+) -> anyhow::Result<CreateChatCompletionRequest> {
+    let mut request = CreateChatCompletionRequestArgs::default();
+    request.model(model).messages(messages);
+    if let Some(max_tokens) = max_tokens {
+        request.max_tokens(max_tokens);
+    }
+    Ok(request.build()?)
+}
+
 async fn stream_response(
     client: &Client<OpenAIConfig>,
     messages: Vec<ChatCompletionRequestMessage>,
     model: String,
+    max_tokens: Option<u32>,
     on_token: impl Fn(&str) + Send + Sync + 'static,
 ) -> anyhow::Result<Option<String>> {
-    let request = CreateChatCompletionRequestArgs::default()
-        .model(model)
-        .messages(messages.clone())
-        .build()?;
-
+    let request = build_stream_request(messages, model, max_tokens)?;
     let mut stream = client.chat().create_stream(request).await?;
 
     let mut response_text: Option<String> = None;
@@ -733,8 +821,49 @@ async fn tool_calling_stream(
 
 #[cfg(test)]
 mod tests {
-    use super::make_schema_strict;
+    use super::{
+        build_stream_request, chat_completion_messages, make_schema_strict, validate_stream_input,
+    };
+    use crate::{ChatMessage, StreamResponseOptions, ToolCallContent, ToolResponseContent};
     use serde_json::json;
+
+    #[test]
+    fn stream_request_preserves_message_order_and_max_tokens() {
+        let messages = chat_completion_messages(
+            "system",
+            vec![
+                ChatMessage::User("one".into()),
+                ChatMessage::Assistant("two".into()),
+                ChatMessage::ToolCall(ToolCallContent {
+                    id: "call".into(),
+                    name: "tool".into(),
+                    arguments: "{}".into(),
+                }),
+                ChatMessage::ToolResponse(ToolResponseContent {
+                    id: "call".into(),
+                    result: "three".into(),
+                }),
+            ],
+        );
+        let request = build_stream_request(messages, "model".into(), Some(42)).unwrap();
+        let json = serde_json::to_value(request).unwrap();
+        assert_eq!(json["messages"][0]["role"], "system");
+        assert_eq!(json["messages"][1]["role"], "user");
+        assert_eq!(json["messages"][2]["role"], "assistant");
+        assert_eq!(json["messages"][3]["role"], "assistant");
+        assert_eq!(json["messages"][4]["role"], "tool");
+        assert_eq!(json["max_tokens"], 42);
+        assert_eq!(StreamResponseOptions::default().max_tokens, None);
+    }
+
+    #[test]
+    fn stream_input_errors_are_safe_and_specific() {
+        let error = validate_stream_input("system", &[], "model")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Prompt is required");
+        assert!(validate_stream_input("system", &[ChatMessage::User("ok".into())], "").is_err());
+    }
 
     #[test]
     fn schemas_are_rewritten_for_strict_mode() {

@@ -7,6 +7,13 @@ use serde::de::DeserializeOwned;
 
 use crate::ChatMessage;
 
+/// Optional controls for a streaming text completion.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamResponseOptions {
+    /// Maximum number of completion tokens, when supported by the provider.
+    pub max_tokens: Option<u32>,
+}
+
 pub trait LLMClient: Debug + Clone {
     fn model(&self) -> Option<String>;
 
@@ -34,6 +41,21 @@ pub trait LLMClient: Debug + Clone {
         model: &str,
         on_token: impl Fn(&str) + Send + Sync + 'static,
     ) -> Result<Option<String>>;
+
+    /// Stream a response with optional provider-specific controls.
+    ///
+    /// The default preserves the legacy behavior for providers that do not
+    /// expose these controls yet.
+    fn stream_response_with_options(
+        &self,
+        system_message: &str,
+        chat_messages: Vec<ChatMessage>,
+        model: &str,
+        _options: StreamResponseOptions,
+        on_token: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Result<Option<String>> {
+        self.stream_response(system_message, chat_messages, model, on_token)
+    }
 
     fn response(
         &self,

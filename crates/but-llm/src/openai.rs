@@ -9,10 +9,11 @@ use serde::de::DeserializeOwned;
 use crate::{
     AI_OPENAI_SECRET_HANDLE, GITBUTLER_ACCESS_TOKEN_HANDLE,
     chat::ChatMessage,
-    client::LLMClient,
+    client::{LLMClient, StreamResponseOptions},
     openai_utils::{
         OpenAIClientProvider, response_blocking, stream_response_blocking,
-        structured_output_blocking, tool_calling_loop, tool_calling_loop_stream,
+        stream_response_blocking_with_options, structured_output_blocking, tool_calling_loop,
+        tool_calling_loop_stream,
     },
 };
 
@@ -84,6 +85,9 @@ impl OpenAiProvider {
             .ok_or(anyhow::anyhow!(
                 "No GitButler token available. Log-in to use the GitButler OpenAI provider"
             ))?;
+        if creds.0.trim().is_empty() {
+            anyhow::bail!("GitButler token is required")
+        }
         Ok((CredentialsKind::GitButlerProxied, creds))
     }
 
@@ -93,6 +97,9 @@ impl OpenAiProvider {
                 "No OpenAI own key configured. Add this through the GitButler settings"
             ),
         )?;
+        if creds.0.trim().is_empty() {
+            anyhow::bail!("OpenAI API key is required")
+        }
         Ok((CredentialsKind::OwnOpenAiKey, creds))
     }
 
@@ -105,6 +112,9 @@ impl OpenAiProvider {
                 .into_string()
                 .map_err(|_| anyhow::anyhow!("Invalid UTF-8 in OPENAI_API_KEY"))?,
         );
+        if creds.0.trim().is_empty() {
+            anyhow::bail!("OPENAI_API_KEY is required")
+        }
         Ok((CredentialsKind::EnvVarOpenAiKey, creds))
     }
 }
@@ -184,6 +194,24 @@ impl LLMClient for OpenAiProvider {
         on_token: impl Fn(&str) + Send + Sync + 'static,
     ) -> Result<Option<String>> {
         stream_response_blocking(self, system_message, chat_messages, model, on_token)
+    }
+
+    fn stream_response_with_options(
+        &self,
+        system_message: &str,
+        chat_messages: Vec<ChatMessage>,
+        model: &str,
+        options: StreamResponseOptions,
+        on_token: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Result<Option<String>> {
+        stream_response_blocking_with_options(
+            self,
+            system_message,
+            chat_messages,
+            model,
+            options,
+            on_token,
+        )
     }
 
     fn structured_output<

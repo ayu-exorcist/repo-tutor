@@ -12,6 +12,7 @@ mod openrouter;
 use std::sync::Arc;
 
 pub use chat::{ChatMessage, StreamToolCallResult, ToolCall, ToolCallContent, ToolResponseContent};
+pub use client::StreamResponseOptions;
 pub use config::*;
 pub use key::CredentialsKeyOption;
 use schemars::JsonSchema;
@@ -490,6 +491,54 @@ impl LLMProvider {
             LLMClientType::OpenRouter(client) => {
                 client.stream_response(system_message, chat_messages, model, on_token)
             }
+        }
+    }
+
+    /// Generates a streaming response with optional OpenAI-compatible controls.
+    pub fn stream_response_with_options(
+        &self,
+        system_message: &str,
+        chat_messages: Vec<ChatMessage>,
+        model: &str,
+        options: StreamResponseOptions,
+        on_token: impl Fn(&str) + Send + Sync + 'static,
+    ) -> anyhow::Result<Option<String>> {
+        match &self.client {
+            LLMClientType::OpenAi(client) => client.stream_response_with_options(
+                system_message,
+                chat_messages,
+                model,
+                options,
+                on_token,
+            ),
+            LLMClientType::Anthropic(client) => client.stream_response_with_options(
+                system_message,
+                chat_messages,
+                model,
+                options,
+                on_token,
+            ),
+            LLMClientType::Ollama(client) => client.stream_response_with_options(
+                system_message,
+                chat_messages,
+                model,
+                options,
+                on_token,
+            ),
+            LLMClientType::LMStudio(client) => client.stream_response_with_options(
+                system_message,
+                chat_messages,
+                model,
+                options,
+                on_token,
+            ),
+            LLMClientType::OpenRouter(client) => client.stream_response_with_options(
+                system_message,
+                chat_messages,
+                model,
+                options,
+                on_token,
+            ),
         }
     }
 
